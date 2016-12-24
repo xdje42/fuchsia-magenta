@@ -160,7 +160,7 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
         // [i, j) is a range of contiguous pages
         size_t run_len = j - i;
         LTRACEF("  run_len %lu\n", run_len);
-        uint run_len_log2 = log2_uint(run_len);
+        uint run_len_log2 = log2_uint_floor(run_len);
         DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT <= TOPA_MAX_SHIFT);
         DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT >= TOPA_MIN_SHIFT);
 
@@ -168,7 +168,7 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
         if (curr_table < table_count) {
             uint64_t val = TOPA_ENTRY_PHYS_ADDR(pa) |
                     TOPA_ENTRY_SIZE(run_len_log2 + PAGE_SIZE_SHIFT);
-            LTRACEF("Table entry %lu, %lu has shift size %d\n", curr_table, curr_idx, run_len_log2 + PAGE_SIZE_SHIFT);
+            LTRACEF("Table entry %lu, %lu has shift size %u\n", curr_table, curr_idx, run_len_log2 + PAGE_SIZE_SHIFT);
             tables[curr_table][curr_idx] = val;
             last_entry = &tables[curr_table][curr_idx];
 
@@ -299,7 +299,7 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
         status = vmm_alloc_contiguous(
                 kernel_aspace, "intelpt",
                 sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES, (void**)&table_ptrs[i],
-                PAGE_SIZE_SHIFT, VMM_FLAG_COMMIT,
+                PAGE_SIZE_SHIFT, 0 /*min_alloc_gap*/, VMM_FLAG_COMMIT,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE);
         if (status != NO_ERROR) {
             printf("ALLOC FAIL: %08lx\n", sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES );
