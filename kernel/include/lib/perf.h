@@ -6,16 +6,15 @@
 
 #pragma once
 
-#include <kernel/thread.h>
-#include <list.h>
+#include <err.h>
 #include <magenta/compiler.h>
+#include <magenta/perf.h>
 #include <stdint.h>
 
 __BEGIN_CDECLS
 
-void x86_processor_trace_init(void);
-status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len);
-status_t x86_processor_trace_disable(size_t* capture_size);
-status_t x86_processor_trace_free(void);
+status_t perf_control(uint32_t action, uint32_t options, void* arg, size_t* out_arg);
+
+int perf_read_user(void* ptr, uint32_t off, uint32_t len);
 
 __END_CDECLS

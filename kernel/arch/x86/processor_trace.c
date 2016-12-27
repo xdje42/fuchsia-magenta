@@ -37,7 +37,7 @@
 #define TOPA_ENTRY_PHYS_ADDR(x) ((uint64_t)(x) & ~((1ULL<<12)-1))
 #define TOPA_ENTRY_SIZE(size_log2) ((uint64_t)((size_log2) - 12) << 6)
 #define TOPA_ENTRY_STOP (1ULL << 4)
-#define TOPA_ENTRY_INT (1ULL << 1)
+#define TOPA_ENTRY_INT (1ULL << 1) // FIXME: << 2
 #define TOPA_ENTRY_END (1ULL << 0)
 
 // Macros for extracting info from ToPA entries
@@ -227,7 +227,6 @@ static size_t compute_capture_size(uint64_t** tables, size_t table_count,
                                    uint64_t curr_table_paddr,
                                    uint32_t curr_table_entry_idx,
                                    uint32_t curr_entry_offset) {
-
     size_t total_size = 0;
     for (size_t i = 0; i < table_count; ++i) {
         paddr_t table_paddr = vaddr_to_paddr(tables[i]);
@@ -327,20 +326,26 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
     // TODO(teisenbe): Change the permssions on the tables to read-only
 
     thread->arch.processor_trace_ctx = table_ptrs;
-
     return NO_ERROR;
-cleanup:
+
+ cleanup:
     for (size_t i = 0; i < table_count; ++i) {
         if (table_ptrs[i]) {
             vmm_free_region(kernel_aspace, (vaddr_t)table_ptrs[i]);
         }
     }
+    free(table_ptrs);
     return status;
 }
 
 // *capture_size* will be populated with the amount of data captured, on
 // success.
 status_t x86_processor_trace_disable(size_t* capture_size) {
+    thread_t* thread = get_current_thread();
+    if (!thread->arch.processor_trace_ctx) {
+        return ERR_BAD_STATE;
+    }
+
     // Disable the trace
     write_msr(IA32_RTIT_CTL, 0);
 
@@ -358,11 +363,6 @@ status_t x86_processor_trace_disable(size_t* capture_size) {
 
     // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
 
-    thread_t* thread = get_current_thread();
-    if (!thread->arch.processor_trace_ctx) {
-        return ERR_BAD_STATE;
-    }
-
     uint64_t** table_ptrs = thread->arch.processor_trace_ctx;
     size_t table_count = 0;
     while (table_ptrs[table_count]) {
@@ -373,6 +373,26 @@ status_t x86_processor_trace_disable(size_t* capture_size) {
                                          curr_table,
                                          (uint32_t)trace_cursors >> 7,
                                          (uint32_t)(trace_cursors >> 32));
+
+    return NO_ERROR;
+}
+
+// Release resources acquired by x86_processor_trace_enable.
+
+status_t x86_processor_trace_free(void) {
+    thread_t* thread = get_current_thread();
+    if (!thread->arch.processor_trace_ctx) {
+        return ERR_BAD_STATE;
+    }
+
+    uint64_t** table_ptrs = thread->arch.processor_trace_ctx;
+
+    vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
+    size_t i = 0;
+    while (table_ptrs[i]) {
+        vmm_free_region(kernel_aspace, (vaddr_t)table_ptrs[i]);
+        ++i;
+    }
 
     free(table_ptrs);
     thread->arch.processor_trace_ctx = NULL;
