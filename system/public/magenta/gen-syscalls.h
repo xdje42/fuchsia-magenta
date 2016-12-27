@@ -701,6 +701,32 @@ extern mx_status_t _mx_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
+extern mx_status_t mx_perf_trace_read(
+    mx_handle_t handle,
+    void* data,
+    uint32_t offset,
+    uint32_t len,
+    uint32_t actual[1]);
+
+extern mx_status_t _mx_perf_trace_read(
+    mx_handle_t handle,
+    void* data,
+    uint32_t offset,
+    uint32_t len,
+    uint32_t actual[1]);
+
+extern mx_status_t mx_perf_trace_control(
+    mx_handle_t handle,
+    uint32_t action,
+    uint32_t options,
+    void* ptr);
+
+extern mx_status_t _mx_perf_trace_control(
+    mx_handle_t handle,
+    uint32_t action,
+    uint32_t options,
+    void* ptr);
+
 extern mx_status_t mx_thread_arch_prctl(
     mx_handle_t handle,
     uint32_t op,
