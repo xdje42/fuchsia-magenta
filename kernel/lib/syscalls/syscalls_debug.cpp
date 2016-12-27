@@ -21,6 +21,7 @@
 #include <lib/user_copy.h>
 #include <lib/user_copy/user_ptr.h>
 #include <lib/ktrace.h>
+#include <lib/perf.h>
 
 #include <lk/init.h>
 #include <platform/debug.h>
@@ -282,13 +283,15 @@ mx_status_t sys_ktrace_write(mx_handle_t handle, uint32_t event_id, uint32_t arg
 mx_status_t sys_perf_trace_read(mx_handle_t handle, void* _data,
                                 uint32_t offset, uint32_t len,
                                 uint32_t* _actual) {
+#if 0 // FIXME: wip
     // TODO: finer grained validation
     mx_status_t status;
     if ((status = validate_resource_handle(handle)) < 0) {
         return status;
     }
+#endif
 
-    int result = ktrace_read_user(_data, offset, len);
+    int result = perf_read_user(_data, offset, len);
     if (result < 0)
         return result;
 
@@ -296,22 +299,28 @@ mx_status_t sys_perf_trace_read(mx_handle_t handle, void* _data,
 }
 
 mx_status_t sys_perf_trace_control(mx_handle_t handle, uint32_t action, uint32_t options, void* _ptr) {
-    // TODO: finer grained validation
     mx_status_t status;
+
+#if 0 // FIXME: wip
+    // TODO: finer grained validation
     if ((status = validate_resource_handle(handle)) < 0) {
         return status;
     }
+#endif
+
+    size_t out_arg;
+    status = perf_control(action, options, _ptr, &out_arg);
+    if (status != NO_ERROR)
+        return status;
 
     switch (action) {
-    case KTRACE_ACTION_NEW_PROBE: {
-        char name[MX_MAX_NAME_LEN];
-        if (make_user_ptr(_ptr).copy_array_from_user(name, sizeof(name) - 1) != NO_ERROR)
-            return ERR_INVALID_ARGS;
-        name[sizeof(name) - 1] = 0;
-        return ktrace_control(action, options, name);
+    case PERF_ACTION_GET_SIZE: {
+        // FIXME: for now
+        auto _out_arg = reinterpret_cast<uint64_t*>(_ptr);
+        return make_user_ptr(_out_arg).copy_to_user(out_arg);
     }
     default:
-        return ktrace_control(action, options, nullptr);
+        return NO_ERROR;
     }
 }
 
