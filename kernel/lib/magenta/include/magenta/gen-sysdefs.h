@@ -363,6 +363,19 @@ mx_status_t sys_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
+mx_status_t sys_perf_trace_read(
+    mx_handle_t handle,
+    void* data,
+    uint32_t offset,
+    uint32_t len,
+    uint32_t actual[1]);
+
+mx_status_t sys_perf_trace_control(
+    mx_handle_t handle,
+    uint32_t action,
+    uint32_t options,
+    void* ptr);
+
 mx_handle_t sys_debug_transfer_handle(
     mx_handle_t proc,
     mx_handle_t handle);
