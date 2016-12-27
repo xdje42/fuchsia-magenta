@@ -18,6 +18,7 @@ clang-format
 *_LOCAL_*
 *_BASE_*
 *.sublime-*
+/generated.*
 /infra/.recipe_deps
 /out*
 /prebuilt/downloads/
