@@ -6,6 +6,7 @@
 
 #include "lib/perf.h"
 
+#include <arch/user_copy.h>
 #include <kernel/vm.h>
 #include <list.h>
 #include <new.h>
@@ -102,5 +103,25 @@ status_t perf_control(uint32_t action, uint32_t options, void* arg, size_t* out_
 }
 
 int perf_read_user(void* ptr, uint32_t off, uint32_t len) {
-    return -1;
+    if (perf_data_page_array == nullptr)
+        return ERR_BAD_STATE;
+    if (off != 0 || len != capture_size)
+        return ERR_INVALID_ARGS;
+
+    while (len > 0) {
+        uint32_t n = PAGE_SIZE;
+        if (n > len)
+            n = len;
+
+        auto pg = perf_data_page_array[off / PAGE_SIZE];
+        auto p = paddr_to_kvaddr(vm_page_to_paddr(pg));
+        if (arch_copy_to_user(ptr, p, len) != NO_ERROR)
+            return ERR_INVALID_ARGS;
+
+        ptr = reinterpret_cast<char*>(ptr) + n;
+        off += n;
+        len -= n;
+    }
+
+    return (int) capture_size;
 }
