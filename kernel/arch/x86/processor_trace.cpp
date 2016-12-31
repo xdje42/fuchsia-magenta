@@ -161,7 +161,7 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
         // [i, j) is a range of contiguous pages
         size_t run_len = j - i;
         LTRACEF("  run_len %lu\n", run_len);
-        uint run_len_log2 = log2_uint_floor(run_len);
+        size_t run_len_log2 = log2_ulong_floor(run_len);
         DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT <= TOPA_MAX_SHIFT);
         DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT >= TOPA_MIN_SHIFT);
 
@@ -169,7 +169,7 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
         if (curr_table < table_count) {
             uint64_t val = TOPA_ENTRY_PHYS_ADDR(pa) |
                     TOPA_ENTRY_SIZE(run_len_log2 + PAGE_SIZE_SHIFT);
-            LTRACEF("Table entry %lu, %lu has shift size %u\n", curr_table, curr_idx, run_len_log2 + PAGE_SIZE_SHIFT);
+            LTRACEF("Table entry %lu, %lu has shift size %lu\n", curr_table, curr_idx, run_len_log2 + PAGE_SIZE_SHIFT);
             tables[curr_table][curr_idx] = val;
             last_entry = &tables[curr_table][curr_idx];
 
@@ -289,7 +289,8 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
     // Allocate our Table(s) of Physical Addresses
     // Null-terminate the array, so we don't have to pass around the count
     // for trace_disable().
-    uint64_t** table_ptrs = calloc(sizeof(uint64_t*), table_count + 1);
+    auto table_ptrs =
+        reinterpret_cast<uint64_t**>(calloc(sizeof(uint64_t*), table_count + 1));
     if (!table_ptrs) {
         return ERR_NO_MEMORY;
     }
@@ -311,28 +312,30 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
     TRACEF("Enabling processor trace, kernel cr3: 0x%" PRIxPTR "\n",
            x86_kernel_cr3());
 
-    make_topa(page_array, len, table_ptrs, table_count);
+    {
+        make_topa(page_array, len, table_ptrs, table_count);
 
-    paddr_t first_table_phys = vaddr_to_paddr(table_ptrs[0]);
+        paddr_t first_table_phys = vaddr_to_paddr(table_ptrs[0]);
 
-    // Load the ToPA configuration
-    write_msr(IA32_RTIT_OUTPUT_BASE, first_table_phys);
-    write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
+        // Load the ToPA configuration
+        write_msr(IA32_RTIT_OUTPUT_BASE, first_table_phys);
+        write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
 
-    // Enable the trace
-    uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
-    // TODO(teisenbe): Allow caller provided flags for controlling
-    // these options.
-    ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
-    ctl |= RTIT_CTL_BRANCH_EN;
-    ctl |= RTIT_CTL_TSC_EN;
-    //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
-    write_msr(IA32_RTIT_CTL, ctl);
+        // Enable the trace
+        uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
+        // TODO(teisenbe): Allow caller provided flags for controlling
+        // these options.
+        ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
+        ctl |= RTIT_CTL_BRANCH_EN;
+        ctl |= RTIT_CTL_TSC_EN;
+        //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
+        write_msr(IA32_RTIT_CTL, ctl);
 
-    // TODO(teisenbe): Change the permssions on the tables to read-only
+        // TODO(teisenbe): Change the permssions on the tables to read-only
 
-    thread->arch.processor_trace_ctx = table_ptrs;
-    return NO_ERROR;
+        thread->arch.processor_trace_ctx = table_ptrs;
+        return NO_ERROR;
+    }
 
  cleanup:
     for (size_t i = 0; i < table_count; ++i) {
@@ -369,7 +372,8 @@ status_t x86_processor_trace_disable(size_t* capture_size) {
 
     // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
 
-    uint64_t** table_ptrs = thread->arch.processor_trace_ctx;
+    auto table_ptrs =
+        reinterpret_cast<uint64_t**>(thread->arch.processor_trace_ctx);
     size_t table_count = 0;
     while (table_ptrs[table_count]) {
         table_count++;
@@ -391,7 +395,8 @@ status_t x86_processor_trace_free(void) {
         return ERR_BAD_STATE;
     }
 
-    uint64_t** table_ptrs = thread->arch.processor_trace_ctx;
+    auto table_ptrs =
+        reinterpret_cast<uint64_t**>(thread->arch.processor_trace_ctx);
 
     vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
     size_t i = 0;
