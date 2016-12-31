@@ -9,6 +9,7 @@
 
 #include <arch/x86.h>
 #include <arch/x86/feature.h>
+#include <arch/x86/mmu.h>
 #include <arch/x86/processor_trace.h>
 #include <err.h>
 #include <kernel/thread.h>
@@ -306,6 +307,10 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
         }
     }
 
+    // xyzdje
+    TRACEF("Enabling processor trace, kernel cr3: 0x%" PRIxPTR "\n",
+           x86_kernel_cr3());
+
     make_topa(page_array, len, table_ptrs, table_count);
 
     paddr_t first_table_phys = vaddr_to_paddr(table_ptrs[0]);
@@ -321,6 +326,7 @@ status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
     ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
     ctl |= RTIT_CTL_BRANCH_EN;
     ctl |= RTIT_CTL_TSC_EN;
+    //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
     write_msr(IA32_RTIT_CTL, ctl);
 
     // TODO(teisenbe): Change the permssions on the tables to read-only

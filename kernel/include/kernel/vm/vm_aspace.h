@@ -46,6 +46,7 @@ public:
     arch_aspace_t& arch_aspace() { return arch_aspace_; }
     bool is_user() const { return (flags_ & TYPE_MASK) == TYPE_USER; }
     mxtl::RefPtr<VmAddressRegion> root_vmar() { return root_vmar_; }
+    paddr_t get_perf_aspace() const { return arch_perf_aspace(&arch_aspace_); }
 
     // destroy but not free the address space
     status_t Destroy();

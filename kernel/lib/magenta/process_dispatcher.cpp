@@ -62,7 +62,7 @@ Handle* map_value_to_handle(mx_handle_t value, mx_handle_t mixer) {
 
 mx_status_t ProcessDispatcher::Create(
     mxtl::RefPtr<JobDispatcher> job, mxtl::StringPiece name, uint32_t flags,
-    mxtl::RefPtr<Dispatcher>* dispatcher, mx_rights_t* rights,
+    mxtl::RefPtr<ProcessDispatcher>* dispatcher, mx_rights_t* rights,
     mxtl::RefPtr<VmAddressRegionDispatcher>* root_vmar_disp,
     mx_rights_t* root_vmar_rights) {
     AllocChecker ac;
@@ -75,7 +75,7 @@ mx_status_t ProcessDispatcher::Create(
         return result;
 
     *rights = kDefaultProcessRights;
-    *dispatcher = mxtl::AdoptRef<Dispatcher>(process);
+    *dispatcher = mxtl::AdoptRef<ProcessDispatcher>(process);
 
     // Create a dispatcher for the root VMAR.
     mxtl::RefPtr<Dispatcher> new_vmar_dispatcher;
