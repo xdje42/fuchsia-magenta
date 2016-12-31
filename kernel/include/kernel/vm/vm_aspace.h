@@ -49,6 +49,8 @@ public:
     // Get the root VMAR (briefly acquires the aspace lock)
     mxtl::RefPtr<VmAddressRegion> RootVmar();
 
+    paddr_t get_perf_aspace() const { return arch_perf_aspace(&arch_aspace_); }
+
     // destroy but not free the address space
     status_t Destroy();
 

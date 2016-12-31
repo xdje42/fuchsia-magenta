@@ -289,7 +289,7 @@ static int attempt_userboot(const void* bootfs, size_t bfslen) {
     if (status != NO_ERROR)
         return status;
 
-    mxtl::RefPtr<Dispatcher> proc_disp;
+    mxtl::RefPtr<ProcessDispatcher> proc_disp;
     mxtl::RefPtr<VmAddressRegionDispatcher> vmar;
     mx_rights_t rights, vmar_rights;
     status = ProcessDispatcher::Create(GetRootJobDispatcher(), "userboot", 0,

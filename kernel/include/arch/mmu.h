@@ -38,6 +38,9 @@ typedef struct arch_aspace arch_aspace_t;
 status_t arch_mmu_init_aspace(arch_aspace_t *aspace, vaddr_t base, size_t size, uint flags) __NONNULL((1));
 status_t arch_mmu_destroy_aspace(arch_aspace_t *aspace) __NONNULL((1));
 
+/* return the address space value used by h/w performance tracing */
+paddr_t arch_perf_aspace(const arch_aspace_t* aspace);
+
 /* routines to map/unmap/update permissions/query mappings per address space */
 int arch_mmu_map(arch_aspace_t *aspace, vaddr_t vaddr, paddr_t paddr, size_t count, uint flags) __NONNULL((1));
 int arch_mmu_unmap(arch_aspace_t *aspace, vaddr_t vaddr, size_t count) __NONNULL((1));
