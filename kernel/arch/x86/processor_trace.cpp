@@ -7,13 +7,18 @@
 // We currently only support Table of Physical Addresses mode currently, so that
 // we can have stop-on-full behavior rather than wrap-around.
 
+#include <arch/user_copy.h>
 #include <arch/x86.h>
 #include <arch/x86/feature.h>
 #include <arch/x86/mmu.h>
 #include <arch/x86/processor_trace.h>
 #include <err.h>
+#include <kernel/mp.h>
 #include <kernel/thread.h>
 #include <kernel/vm.h>
+#include <mxtl/macros.h>
+#include <mxtl/unique_ptr.h>
+#include <new.h>
 #include <pow2.h>
 #include <trace.h>
 
@@ -87,6 +92,60 @@ static bool supports_output_topa_multi = false;
 static bool supports_output_single = false;
 static bool supports_output_transport = false;
 
+static bool active = false;
+
+// number of buffers, each 2^|pt_buffer_order| pages in size
+static size_t pt_num_buffers = 16;
+
+// log2 size of each buffer, in pages, default is 16KB
+static uint8_t pt_buffer_order = 2;
+
+// maximum space, in bytes, for trace buffers (per cpu)
+static size_t max_per_cpu_space = 16 * 1024 * 1024;
+
+class x86_cpu_pt_data {
+  public:
+    x86_cpu_pt_data();
+    ~x86_cpu_pt_data();
+
+    // these are static values set by x86_processor_trace_alloc.
+    struct list_node buffer_page_list_;
+    size_t table_count_;
+    uint64_t** table_ptrs_;
+
+    // these values are set when tracing stops
+    uint64_t curr_table_;
+    uint64_t cursors_;
+
+    DISALLOW_COPY_ASSIGN_AND_MOVE(x86_cpu_pt_data);
+};
+static x86_cpu_pt_data* pt_data;
+
+x86_cpu_pt_data::x86_cpu_pt_data()
+    : table_count_(0),
+      table_ptrs_(nullptr),
+      curr_table_(0),
+      cursors_(0) {
+    list_initialize(&buffer_page_list_);
+}
+
+x86_cpu_pt_data::~x86_cpu_pt_data() {
+    pmm_free(&buffer_page_list_);
+
+    if (table_ptrs_) {
+        vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
+        for (size_t i = 0; i < table_count_; ++i) {
+            if (table_ptrs_[i])
+                vmm_free_region(kernel_aspace, (vaddr_t)table_ptrs_[i]);
+        }
+        free(table_ptrs_);
+    }
+}
+
+static inline vm_page_t* next_page(list_node_t* list, vm_page_t* p) {
+    return list_next_type(list, &p->free.node, vm_page_t, free.node);
+}
+
 void x86_processor_trace_init(void)
 {
     if (!x86_feature_test(X86_FEATURE_PT)) {
@@ -114,56 +173,43 @@ void x86_processor_trace_init(void)
     // to enumerate subleaf 1
 }
 
-// Create a ToPA making use of the pages in the *page_array*, in order.
+// Create a ToPA, using the pages in |pages|.
+// |len| is the number of entries in the list.
+// Pages are assumed to have been created in sets of contiguous chunks,
+// see x86_processor_trace_alloc.
 // Returns the number of ToPA entries necessary to make use of the array.
+// |tables| may be nullptr (in which case |table_count| must be zero),
+// which means to just compute the required number of entries.
 //
 // This assumes that tables are 16KB in size (technically can be up to 256MB).
 // A 16KB table provides 2047 non-END entries, so at the
 // minimum can provide a capture buffer of just under 8MB.  The output count
 // includes the END entries across all neeeded tables.
-static size_t make_topa(vm_page_t** page_array, size_t len,
+static size_t make_topa(list_node_t* pages, size_t len,
                         uint64_t** tables, size_t table_count) {
-    size_t num_entries = 0;
+    LTRACEF("Processing request with %zu pages\n", len);
 
+    const size_t run_len_log2 = pt_buffer_order;
+    const size_t run_len = 1 << run_len_log2;
+    DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT <= TOPA_MAX_SHIFT);
+    DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT >= TOPA_MIN_SHIFT);
+    DEBUG_ASSERT(len == list_length(pages));
+    DEBUG_ASSERT(len == pt_num_buffers * run_len);
+
+    size_t num_entries = 0;
     size_t curr_table = 0;
     size_t curr_idx = 0;
-    uint64_t* last_entry = NULL;
+    uint64_t* last_entry = nullptr;
 
-    LTRACEF("Processing request with %lu pages\n", len);
+    // Note: An early version of this patch auto-computed the desired grouping
+    // of pages with sufficient alignment. If you find yourself needing this
+    // functionality again, check change 9470.
 
-    // ToPA entries of size N must be aligned to N, too.  Attempt
-    // to find runs of pages that meet these requirements and
-    // pack them to reduce ToPA size.
-    for (size_t i = 0; i < len; ++i) {
-        LTRACEF("  i=%lu\n", i);
-        paddr_t pa = vm_page_to_paddr(page_array[i]);
+    vm_page_t* p;
 
-        int best_shift = __builtin_ffsl(pa) - 1;
-        if (best_shift < 0 || best_shift >= TOPA_MAX_SHIFT) {
-            best_shift = TOPA_MAX_SHIFT;
-        }
-
-        // best_shift is now our best possible shfit
-        DEBUG_ASSERT(best_shift >= PAGE_SIZE_SHIFT);
-        const size_t max_run_len = 1UL << (best_shift - PAGE_SIZE_SHIFT);
-        LTRACEF("  best shift: %d, max_run_len %lu\n", best_shift, max_run_len);
-
-        paddr_t prev_pa = pa;
-        size_t j;
-        for (j = i + 1; j < len && j - i < max_run_len; ++j) {
-            paddr_t next_pa = vm_page_to_paddr(page_array[j]);
-            if (next_pa != prev_pa + PAGE_SIZE) {
-                break;
-            }
-            prev_pa = next_pa;
-        }
-
-        // [i, j) is a range of contiguous pages
-        size_t run_len = j - i;
-        LTRACEF("  run_len %lu\n", run_len);
-        size_t run_len_log2 = log2_ulong_floor(run_len);
-        DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT <= TOPA_MAX_SHIFT);
-        DEBUG_ASSERT(run_len_log2 + PAGE_SIZE_SHIFT >= TOPA_MIN_SHIFT);
+    // Each iteration actually covers run_len entries.
+    list_for_every_entry (pages, p, vm_page_t, free.node) {
+        paddr_t pa = vm_page_to_paddr(p);
 
         // Consume all of the pages in this run, and count them as one entry
         if (curr_table < table_count) {
@@ -181,9 +227,30 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
                 curr_idx++;
             }
         }
-        i += (1UL << run_len_log2) - 1;
+
+        // Verify this group of pages is contiguous.
+        vm_page_t* next;
+        for (size_t i = 0; i < run_len - 1; ++i) {
+            next = next_page(pages, p);
+            DEBUG_ASSERT(next);
+            paddr_t pa = vm_page_to_paddr(p);
+            paddr_t next_pa = vm_page_to_paddr(next);
+            DEBUG_ASSERT(next_pa == pa + PAGE_SIZE);
+            p = next;
+        }
+        p = next;
+
         num_entries++;
     }
+
+    size_t num_end_entries = (num_entries + TOPA_MAX_TABLE_ENTRIES - 2) /
+            (TOPA_MAX_TABLE_ENTRIES - 1);
+    size_t result = num_entries + num_end_entries;
+    LTRACEF("num_end_entries: %zu\n", num_end_entries);
+    LTRACEF("total entries: %zu\n", result);
+
+    if (tables == nullptr)
+        return result;
 
     // Populate END entries for completed tables
     for (size_t i = 0; i < curr_table; ++i) {
@@ -211,23 +278,25 @@ static size_t make_topa(vm_page_t** page_array, size_t len,
         *last_entry |= TOPA_ENTRY_STOP;
     }
 
-    size_t num_end_entries = (num_entries + TOPA_MAX_TABLE_ENTRIES - 2) /
-            (TOPA_MAX_TABLE_ENTRIES - 1);
-    LTRACEF("num_end_entries: %lu\n", num_end_entries);
-
-    LTRACEF("total entries: %lu\n", num_entries + num_end_entries);
-    return num_entries + num_end_entries;
+    return result;
 }
 
-static size_t compute_topa_entry_count(vm_page_t** page_array, size_t len) {
-    return make_topa(page_array, len, NULL, 0);
+static size_t compute_topa_entry_count(list_node_t* pages, size_t len) {
+    return make_topa(pages, len, nullptr, 0);
 }
 
 // Walk the tables to discover how much has been captured
-static size_t compute_capture_size(uint64_t** tables, size_t table_count,
+// TODO(dje): Just pass cpu, ptd.
+static size_t compute_capture_size(uint32_t cpu,
+                                   uint64_t** tables, size_t table_count,
                                    uint64_t curr_table_paddr,
                                    uint32_t curr_table_entry_idx,
                                    uint32_t curr_entry_offset) {
+    TRACEF("compute_capture_size: cpu %u, tables %p, table_count %zu\n",
+           cpu, tables, table_count);
+    TRACEF("    curr_table_paddr 0x%" PRIx64 ", curr_table_entry_idx %u, curr_entry_offset %u\n",
+           curr_table_paddr, curr_table_entry_idx, curr_entry_offset);
+
     size_t total_size = 0;
     for (size_t i = 0; i < table_count; ++i) {
         paddr_t table_paddr = vaddr_to_paddr(tables[i]);
@@ -244,123 +313,163 @@ static size_t compute_capture_size(uint64_t** tables, size_t table_count,
     }
 
     // Should be unreachable...
+#if 0
     panic("unexpectedly exited capture loop");
+#else
+    TRACEF("unexpectedly exited capture loop\n");
+    return 0;
+#endif
 }
 
-// This operates in the thread-context.  The currently running thread will
-// be traced until either trace_disable() is called or until the capture
-// buffer fills.
-//
-// *page_array* is an array of pages to be used as the capture buffer.
-// If this function call succeeds, the thread is considered to be holding a
-// logical reference to this capture buffer, and trace_disable() *must*
-// be invoked before freeing the pages.
-status_t x86_processor_trace_enable(vm_page_t** page_array, size_t len) {
-    status_t status = ERR_INTERNAL;
+// Allocate space for the trace buffers, for each cpu,
+// and do any other initialization needed prior to starting a trace.
 
-    if (!supports_output_topa) {
+status_t x86_processor_trace_alloc() {
+    if (!supports_output_topa)
         return ERR_NOT_SUPPORTED;
+
+    // TODO: lock
+    if (active)
+        return ERR_BAD_STATE;
+    if (pt_data)
+        return ERR_BAD_STATE;
+
+    size_t buffer_pages = 1 << pt_buffer_order;
+    size_t nr_pages = pt_num_buffers * buffer_pages;
+    uint64_t total_per_cpu = nr_pages * PAGE_SIZE;
+    if (total_per_cpu > max_per_cpu_space)
+        return ERR_INVALID_ARGS;
+
+    mxtl::unique_ptr<x86_cpu_pt_data[]> data;
+    {
+        AllocChecker ac;
+        data = mxtl::unique_ptr<x86_cpu_pt_data[]>(new (&ac) x86_cpu_pt_data[x86_num_cpus]);
+        if (!ac.check())
+            return ERR_NO_MEMORY;
     }
 
-    thread_t* thread = get_current_thread();
-    if (thread->arch.processor_trace_ctx) {
-        return ERR_BAD_STATE;
-    }
-    if ((read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN) ||
-        (read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED)) {
-        return ERR_BAD_STATE;
+    for (size_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
+        for (size_t i = 0; i < pt_num_buffers; ++i) {
+            // ToPA entries of size N must be aligned to N, too.
+            uint8_t alignment_log2 =
+                static_cast<uint8_t>(PAGE_SIZE_SHIFT + pt_buffer_order);
+            size_t count = pmm_alloc_contiguous(buffer_pages, 0, alignment_log2, nullptr, &data[cpu].buffer_page_list_);
+            if (count != buffer_pages)
+                return ERR_NO_MEMORY;
+        }
     }
 
-    size_t entry_count = compute_topa_entry_count(page_array, len);
+    size_t entry_count =
+        compute_topa_entry_count(&data[0].buffer_page_list_, nr_pages);
     size_t table_count = (entry_count + TOPA_MAX_TABLE_ENTRIES - 1) /
             TOPA_MAX_TABLE_ENTRIES;
 
     if (entry_count < 2) {
-        printf("INVALID ENTRY COUNT: %lu\n", entry_count);
+        TRACEF("INVALID ENTRY COUNT: %zu\n", entry_count);
         return ERR_INVALID_ARGS;
     }
 
     // Some early Processor Trace implementations only supported having a
     // table with a single real entry and an END.
-    if (!supports_output_topa_multi && entry_count > 2) {
+    if (!supports_output_topa_multi && entry_count > 2)
         return ERR_NOT_SUPPORTED;
-    }
 
-    // Allocate our Table(s) of Physical Addresses
-    // Null-terminate the array, so we don't have to pass around the count
-    // for trace_disable().
-    auto table_ptrs =
-        reinterpret_cast<uint64_t**>(calloc(sizeof(uint64_t*), table_count + 1));
-    if (!table_ptrs) {
-        return ERR_NO_MEMORY;
-    }
+    // Allocate Table(s) of Physical Addresses for each cpu.
 
     vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
-    for (size_t i = 0; i < table_count; ++i) {
-        status = vmm_alloc_contiguous(
+
+    for (size_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
+        data[cpu].table_ptrs_ =
+            reinterpret_cast<uint64_t**>(calloc(sizeof(uint64_t*), table_count));
+        if (!data[cpu].table_ptrs_)
+            return ERR_NO_MEMORY;
+        data[cpu].table_count_ = table_count;
+
+        for (size_t i = 0; i < table_count; ++i) {
+            auto status = vmm_alloc_contiguous(
                 kernel_aspace, "intelpt",
-                sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES, (void**)&table_ptrs[i],
+                sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES,
+                (void**)&data[cpu].table_ptrs_[i],
                 PAGE_SIZE_SHIFT, 0 /*min_alloc_gap*/, VMM_FLAG_COMMIT,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE);
-        if (status != NO_ERROR) {
-            printf("ALLOC FAIL: %08lx\n", sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES );
-            goto cleanup;
-        }
+            if (status != NO_ERROR)
+                return ERR_NO_MEMORY;
+         }
+
+        make_topa(&data[cpu].buffer_page_list_, nr_pages,
+                  data[cpu].table_ptrs_, table_count);
     }
 
-    // xyzdje
+    pt_data = data.release();
+
+    return NO_ERROR;
+}
+
+static void x86_pt_start_task(void* raw_context) {
+    DEBUG_ASSERT(arch_ints_disabled());
+    DEBUG_ASSERT(raw_context == nullptr);
+    DEBUG_ASSERT(active && pt_data);
+
+    DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN) &&
+                 !(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
+
+    uint32_t cpu = arch_curr_cpu_num();
+    x86_percpu* xpc = x86_get_percpu();
+    DEBUG_ASSERT(!xpc->pt_data);
+    x86_cpu_pt_data* ptd = &pt_data[cpu];
+
+    xpc->pt_data = ptd;
+    ptd->curr_table_ = 0;
+    ptd->cursors_ = 0;
+
+    paddr_t first_table_phys = vaddr_to_paddr(ptd->table_ptrs_[0]);
+
+    // Load the ToPA configuration
+    write_msr(IA32_RTIT_OUTPUT_BASE, first_table_phys);
+    write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
+
+    // Enable the trace
+    uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
+    // TODO(teisenbe): Allow caller provided flags for controlling
+    // these options.
+    ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
+    ctl |= RTIT_CTL_BRANCH_EN;
+    ctl |= RTIT_CTL_TSC_EN;
+    //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
+    write_msr(IA32_RTIT_CTL, ctl);
+}
+
+// Begin the trace.
+status_t x86_processor_trace_start() {
+    // TODO(dje): Could provide an API to obtain this, but we need to log
+    // cr3s for potentially all processes anyway.
     TRACEF("Enabling processor trace, kernel cr3: 0x%" PRIxPTR "\n",
            x86_kernel_cr3());
 
-    {
-        make_topa(page_array, len, table_ptrs, table_count);
+    if (active)
+        return ERR_BAD_STATE;
+    if (!pt_data)
+        return ERR_BAD_STATE;
 
-        paddr_t first_table_phys = vaddr_to_paddr(table_ptrs[0]);
-
-        // Load the ToPA configuration
-        write_msr(IA32_RTIT_OUTPUT_BASE, first_table_phys);
-        write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
-
-        // Enable the trace
-        uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
-        // TODO(teisenbe): Allow caller provided flags for controlling
-        // these options.
-        ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
-        ctl |= RTIT_CTL_BRANCH_EN;
-        ctl |= RTIT_CTL_TSC_EN;
-        //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
-        write_msr(IA32_RTIT_CTL, ctl);
-
-        // TODO(teisenbe): Change the permssions on the tables to read-only
-
-        thread->arch.processor_trace_ctx = table_ptrs;
-        return NO_ERROR;
-    }
-
- cleanup:
-    for (size_t i = 0; i < table_count; ++i) {
-        if (table_ptrs[i]) {
-            vmm_free_region(kernel_aspace, (vaddr_t)table_ptrs[i]);
-        }
-    }
-    free(table_ptrs);
-    return status;
+    active = true;
+    //mp_sync_exec(MP_CPU_ALL, x86_pt_start_task, nullptr);
+    return NO_ERROR;
 }
 
-// *capture_size* will be populated with the amount of data captured, on
-// success.
-status_t x86_processor_trace_disable(size_t* capture_size) {
-    thread_t* thread = get_current_thread();
-    if (!thread->arch.processor_trace_ctx) {
-        return ERR_BAD_STATE;
-    }
+static void x86_pt_stop_task(void* raw_context) {
+    DEBUG_ASSERT(arch_ints_disabled());
+    DEBUG_ASSERT(raw_context == nullptr);
 
     // Disable the trace
     write_msr(IA32_RTIT_CTL, 0);
 
+    x86_percpu* xpc = x86_get_percpu();
+    x86_cpu_pt_data* ptd = xpc->pt_data;
+    DEBUG_ASSERT(ptd);
+
     // Save info we care about for output
-    uint64_t curr_table = read_msr(IA32_RTIT_OUTPUT_BASE);
-    uint64_t trace_cursors = read_msr(IA32_RTIT_OUTPUT_MASK_PTRS);
+    ptd->curr_table_ = read_msr(IA32_RTIT_OUTPUT_BASE);
+    ptd->cursors_ = read_msr(IA32_RTIT_OUTPUT_MASK_PTRS);
 
     // Zero all MSRs so that we are in the XSAVE initial configuration
     write_msr(IA32_RTIT_OUTPUT_BASE, 0);
@@ -370,42 +479,128 @@ status_t x86_processor_trace_disable(size_t* capture_size) {
         write_msr(IA32_RTIT_CR3_MATCH, 0);
     }
 
-    // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
+    xpc->pt_data = nullptr;
 
-    auto table_ptrs =
-        reinterpret_cast<uint64_t**>(thread->arch.processor_trace_ctx);
-    size_t table_count = 0;
-    while (table_ptrs[table_count]) {
-        table_count++;
+    // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
+}
+
+status_t x86_processor_trace_stop() {
+    if (!active)
+        return ERR_BAD_STATE;
+    if (!pt_data)
+        return ERR_BAD_STATE;
+
+    //mp_sync_exec(MP_CPU_ALL, x86_pt_stop_task, nullptr);
+    active = false;
+    return NO_ERROR;
+}
+
+// On success |*capture_size| will be populated with the amount of data
+// captured, for each cpu.
+// |capture_size| is an array of at |num_cpus| entries,
+// which for simplicity sake must be |x86_num_cpus|.
+status_t x86_processor_trace_read_size(size_t* capture_size,
+                                       uint32_t num_cpus) {
+    DEBUG_ASSERT(num_cpus == x86_num_cpus);
+    if (active)
+        return ERR_BAD_STATE;
+    if (!pt_data)
+        return ERR_BAD_STATE;
+
+    for (uint32_t cpu = 0; cpu < num_cpus; ++cpu) {
+        x86_cpu_pt_data* ptd = &pt_data[cpu];
+        capture_size[cpu] =
+            compute_capture_size(cpu, ptd->table_ptrs_, ptd->table_count_,
+                                 ptd->curr_table_,
+                                 (uint32_t)ptd->cursors_ >> 7,
+                                 (uint32_t)(ptd->cursors_ >> 32));
     }
 
-    *capture_size = compute_capture_size(table_ptrs, table_count,
-                                         curr_table,
-                                         (uint32_t)trace_cursors >> 7,
-                                         (uint32_t)(trace_cursors >> 32));
+    return NO_ERROR;
+}
 
+status_t x86_processor_trace_read_bytes(uint32_t cpu, void* ptr,
+                                        size_t off, size_t len,
+                                        size_t* out_actual) {
+    if (active)
+        return ERR_BAD_STATE;
+    if (!pt_data)
+        return ERR_BAD_STATE;
+    if (cpu >= x86_num_cpus)
+        return ERR_INVALID_ARGS;
+    if (off + len < off)
+        return ERR_INVALID_ARGS;
+
+    x86_cpu_pt_data* ptd = &pt_data[cpu];
+    size_t capture_size = 
+        compute_capture_size(cpu, ptd->table_ptrs_, ptd->table_count_,
+                             ptd->curr_table_,
+                             (uint32_t)ptd->cursors_ >> 7,
+                             (uint32_t)(ptd->cursors_ >> 32));
+    if (off >= capture_size) {
+        *out_actual = 0;
+        return NO_ERROR;
+    }
+    if (off + len > capture_size)
+        len = capture_size - off;
+
+    size_t actual = 0;
+    size_t remaining = len;
+    list_node_t* pages = &ptd->buffer_page_list_;
+
+    // skip to the right starting page
+    size_t page_nr = off / PAGE_SIZE;
+    vm_page_t* pg = list_peek_head_type(pages, vm_page_t, free.node);
+    DEBUG_ASSERT(pg);
+    for (size_t i = 0; i < page_nr; ++i) {
+        pg = next_page(pages, pg);
+        if (!pg)
+            return ERR_INVALID_ARGS;
+    }
+
+    // handle potential non-zero offset into first page
+    if (off % PAGE_SIZE != 0) {
+        actual = PAGE_SIZE - (off % PAGE_SIZE);
+        if (actual > remaining)
+            actual = remaining;
+        auto p = paddr_to_kvaddr(vm_page_to_paddr(pg));
+        if (arch_copy_to_user(ptr, p, actual) != NO_ERROR)
+            return ERR_INVALID_ARGS;
+        remaining -= actual;
+        pg = next_page(pages, pg);
+    }
+
+    while (remaining > 0) {
+        DEBUG_ASSERT(pg);
+
+        uint32_t n = PAGE_SIZE;
+        if (n > remaining)
+            n = static_cast<uint32_t>(remaining);
+
+        auto p = paddr_to_kvaddr(vm_page_to_paddr(pg));
+        if (arch_copy_to_user(ptr, p, n) != NO_ERROR)
+            return ERR_INVALID_ARGS;
+
+        ptr = reinterpret_cast<char*>(ptr) + n;
+        actual += n;
+        remaining -= n;
+        pg = next_page(pages, pg);
+    }
+
+    *out_actual = actual;
     return NO_ERROR;
 }
 
 // Release resources acquired by x86_processor_trace_enable.
 
 status_t x86_processor_trace_free(void) {
-    thread_t* thread = get_current_thread();
-    if (!thread->arch.processor_trace_ctx) {
+    if (active)
         return ERR_BAD_STATE;
+
+    if (pt_data) {
+        delete[] pt_data;
+        pt_data = nullptr;
     }
 
-    auto table_ptrs =
-        reinterpret_cast<uint64_t**>(thread->arch.processor_trace_ctx);
-
-    vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
-    size_t i = 0;
-    while (table_ptrs[i]) {
-        vmm_free_region(kernel_aspace, (vaddr_t)table_ptrs[i]);
-        ++i;
-    }
-
-    free(table_ptrs);
-    thread->arch.processor_trace_ctx = NULL;
     return NO_ERROR;
 }
