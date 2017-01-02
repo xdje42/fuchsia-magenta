@@ -280,48 +280,36 @@ mx_status_t sys_ktrace_write(mx_handle_t handle, uint32_t event_id, uint32_t arg
     return NO_ERROR;
 }
 
-mx_status_t sys_perf_trace_read(mx_handle_t handle, void* _data,
-                                uint32_t offset, uint32_t len,
-                                uint32_t* _actual) {
+mx_status_t sys_perf_read(mx_handle_t handle, uint32_t action, void* _data,
+                          size_t offset, size_t len, size_t* _actual) {
+    mx_status_t status;
+
 #if 0 // FIXME: wip
     // TODO: finer grained validation
-    mx_status_t status;
     if ((status = validate_resource_handle(handle)) < 0) {
         return status;
     }
 #endif
 
-    int result = perf_read_user(_data, offset, len);
-    if (result < 0)
-        return result;
+    size_t actual;
+    status = perf_read(action, _data, offset, len, &actual);
+    if (status < 0)
+        return status;
 
-    return make_user_ptr(_actual).copy_to_user(static_cast<uint32_t>(result));
+    return make_user_ptr(_actual).copy_to_user(actual);
 }
 
-mx_status_t sys_perf_trace_control(mx_handle_t handle, uint32_t action, uint32_t options, void* _ptr) {
-    mx_status_t status;
-
+mx_status_t sys_perf_control(mx_handle_t handle, uint32_t action,
+                             uint32_t options, void* _ptr) {
 #if 0 // FIXME: wip
     // TODO: finer grained validation
+    mx_status_t status;
     if ((status = validate_resource_handle(handle)) < 0) {
         return status;
     }
 #endif
 
-    size_t out_arg;
-    status = perf_control(action, options, _ptr, &out_arg);
-    if (status != NO_ERROR)
-        return status;
-
-    switch (action) {
-    case PERF_ACTION_GET_SIZE: {
-        // FIXME: for now
-        auto _out_arg = reinterpret_cast<uint64_t*>(_ptr);
-        return make_user_ptr(_out_arg).copy_to_user(out_arg);
-    }
-    default:
-        return NO_ERROR;
-    }
+    return perf_control(action, options, _ptr);
 }
 
 mx_status_t sys_thread_read_state(mx_handle_t handle, uint32_t state_kind,

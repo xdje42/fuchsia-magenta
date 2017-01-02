@@ -13,8 +13,9 @@
 
 __BEGIN_CDECLS
 
-status_t perf_control(uint32_t action, uint32_t options, void* arg, size_t* out_arg);
+status_t perf_control(uint32_t action, uint32_t options, void* arg);
 
-int perf_read_user(void* ptr, uint32_t off, uint32_t len);
+int perf_read(uint32_t action, void* ptr, size_t off, size_t len,
+              size_t* actual);
 
 __END_CDECLS

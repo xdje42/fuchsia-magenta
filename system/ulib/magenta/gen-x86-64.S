@@ -1,4 +1,4 @@
-// Copyright 2016 The Fuchsia Authors. All rights reserved.
+// Copyright 2017 The Fuchsia Authors. All rights reserved.
 // This is a GENERATED file. The license governing this file can be found in the LICENSE file.
 
 m_syscall 1 mx_time_get 0
@@ -63,8 +63,8 @@ m_syscall 4 mx_log_read 61
 m_syscall 5 mx_ktrace_read 62
 m_syscall 4 mx_ktrace_control 63
 m_syscall 4 mx_ktrace_write 64
-m_syscall 5 mx_perf_trace_read 65
-m_syscall 4 mx_perf_trace_control 66
+m_syscall 6 mx_perf_read 65
+m_syscall 4 mx_perf_control 66
 m_syscall 3 mx_thread_arch_prctl 67
 m_syscall 2 mx_debug_transfer_handle 68
 m_syscall 3 mx_debug_read 69

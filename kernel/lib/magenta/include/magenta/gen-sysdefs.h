@@ -1,4 +1,4 @@
-// Copyright 2016 The Fuchsia Authors. All rights reserved.
+// Copyright 2017 The Fuchsia Authors. All rights reserved.
 // This is a GENERATED file. The license governing this file can be found in the LICENSE file.
 
 mx_time_t sys_time_get(
@@ -351,14 +351,15 @@ mx_status_t sys_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
-mx_status_t sys_perf_trace_read(
+mx_status_t sys_perf_read(
     mx_handle_t handle,
+    uint32_t action,
     void* data,
-    uint32_t offset,
-    uint32_t len,
-    uint32_t actual[1]);
+    size_t offset,
+    size_t len,
+    size_t actual[1]);
 
-mx_status_t sys_perf_trace_control(
+mx_status_t sys_perf_control(
     mx_handle_t handle,
     uint32_t action,
     uint32_t options,

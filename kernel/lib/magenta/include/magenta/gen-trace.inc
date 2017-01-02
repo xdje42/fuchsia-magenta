@@ -1,4 +1,4 @@
-// Copyright 2016 The Fuchsia Authors. All rights reserved.
+// Copyright 2017 The Fuchsia Authors. All rights reserved.
 // This is a GENERATED file. The license governing this file can be found in the LICENSE file.
 
 {0, 1, "time_get"},
@@ -63,8 +63,8 @@
 {62, 5, "ktrace_read"},
 {63, 4, "ktrace_control"},
 {64, 4, "ktrace_write"},
-{65, 5, "perf_trace_read"},
-{66, 4, "perf_trace_control"},
+{65, 6, "perf_read"},
+{66, 4, "perf_control"},
 {67, 3, "thread_arch_prctl"},
 {68, 2, "debug_transfer_handle"},
 {69, 3, "debug_read"},

@@ -12,11 +12,13 @@ extern "C" {
 
 #if defined(__x86_64__)
 
-#define PERF_ACTION_INIT 0
+#define PERF_ACTION_ALLOC 0
 #define PERF_ACTION_START 1
 #define PERF_ACTION_STOP 2
-#define PERF_ACTION_GET_SIZE 3
-#define PERF_ACTION_END 4
+#define PERF_ACTION_FREE 3
+
+#define PERF_READ_DATA_SIZE 0
+#define PERF_READ_DATA_BYTES 1 /* + cpu# */
 
 #else
 #error "perf not supported for this architecture"

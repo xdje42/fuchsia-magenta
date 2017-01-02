@@ -1,4 +1,4 @@
-// Copyright 2016 The Fuchsia Authors. All rights reserved.
+// Copyright 2017 The Fuchsia Authors. All rights reserved.
 // This is a GENERATED file. The license governing this file can be found in the LICENSE file.
 
     case 0: sfunc = reinterpret_cast<syscall_func>(sys_time_get);
@@ -125,9 +125,9 @@
        break;
     case 64: sfunc = reinterpret_cast<syscall_func>(sys_ktrace_write);
        break;
-    case 65: sfunc = reinterpret_cast<syscall_func>(sys_perf_trace_read);
+    case 65: sfunc = reinterpret_cast<syscall_func>(sys_perf_read);
        break;
-    case 66: sfunc = reinterpret_cast<syscall_func>(sys_perf_trace_control);
+    case 66: sfunc = reinterpret_cast<syscall_func>(sys_perf_control);
        break;
     case 67: sfunc = reinterpret_cast<syscall_func>(sys_thread_arch_prctl);
        break;
