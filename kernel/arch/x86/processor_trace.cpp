@@ -348,7 +348,7 @@ status_t x86_processor_trace_alloc() {
             return ERR_NO_MEMORY;
     }
 
-    for (size_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
+    for (uint32_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
         for (size_t i = 0; i < pt_num_buffers; ++i) {
             // ToPA entries of size N must be aligned to N, too.
             uint8_t alignment_log2 =
@@ -356,6 +356,11 @@ status_t x86_processor_trace_alloc() {
             size_t count = pmm_alloc_contiguous(buffer_pages, 0, alignment_log2, nullptr, &data[cpu].buffer_page_list_);
             if (count != buffer_pages)
                 return ERR_NO_MEMORY;
+            if (i == 0) {
+                vm_page_t* pg = list_peek_head_type(&data[cpu].buffer_page_list_, vm_page_t, free.node);
+                TRACEF("PT: cpu %u: allocated %zu buffer pages @ phys 0x%llx\n",
+                       cpu, buffer_pages, (long long unsigned) vm_page_to_paddr(pg));
+            }
         }
     }
 
@@ -378,26 +383,32 @@ status_t x86_processor_trace_alloc() {
 
     vmm_aspace_t *kernel_aspace = vmm_get_kernel_aspace();
 
-    for (size_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
-        data[cpu].table_ptrs_ =
+    for (uint32_t cpu = 0; cpu < x86_num_cpus; ++cpu) {
+        x86_cpu_pt_data* ptd = &data[cpu];
+        ptd->table_ptrs_ =
             reinterpret_cast<uint64_t**>(calloc(sizeof(uint64_t*), table_count));
-        if (!data[cpu].table_ptrs_)
+        if (!ptd->table_ptrs_)
             return ERR_NO_MEMORY;
-        data[cpu].table_count_ = table_count;
+        ptd->table_count_ = table_count;
 
         for (size_t i = 0; i < table_count; ++i) {
             auto status = vmm_alloc_contiguous(
                 kernel_aspace, "intelpt",
                 sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES,
-                (void**)&data[cpu].table_ptrs_[i],
+                (void**)&ptd->table_ptrs_[i],
                 PAGE_SIZE_SHIFT, 0 /*min_alloc_gap*/, VMM_FLAG_COMMIT,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE);
             if (status != NO_ERROR)
                 return ERR_NO_MEMORY;
+            if (i == 0) {
+                TRACEF("PT: cpu %u: first ToPA table @0x%llx (phys 0x%llx)\n",
+                       cpu, (long long unsigned) ptd->table_ptrs_[i],
+                       (long long unsigned) vaddr_to_paddr(ptd->table_ptrs_[i]));
+            }
          }
 
-        make_topa(&data[cpu].buffer_page_list_, nr_pages,
-                  data[cpu].table_ptrs_, table_count);
+        make_topa(&ptd->buffer_page_list_, nr_pages,
+                  ptd->table_ptrs_, table_count);
     }
 
     pt_data = data.release();
@@ -405,10 +416,18 @@ status_t x86_processor_trace_alloc() {
     return NO_ERROR;
 }
 
+struct task_context
+{
+    uint32_t cpu;
+    uintptr_t data;
+};
+
 static void x86_pt_start_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(raw_context == nullptr);
+    //DEBUG_ASSERT(raw_context == nullptr);
     DEBUG_ASSERT(active && pt_data);
+
+    task_context* context = static_cast<task_context*>(raw_context);
 
     DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN) &&
                  !(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
@@ -427,6 +446,9 @@ static void x86_pt_start_task(void* raw_context) {
     // Load the ToPA configuration
     write_msr(IA32_RTIT_OUTPUT_BASE, first_table_phys);
     write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
+
+    context[cpu].cpu = cpu;
+    context[cpu].data = read_msr(IA32_RTIT_OUTPUT_BASE);
 
     // Enable the trace
     uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
@@ -452,20 +474,42 @@ status_t x86_processor_trace_start() {
         return ERR_BAD_STATE;
 
     active = true;
-    //mp_sync_exec(MP_CPU_ALL, x86_pt_start_task, nullptr);
+
+    task_context context[x86_num_cpus];
+    for (unsigned i = 0; i < x86_num_cpus; ++i) {
+        context[i].cpu = SMP_MAX_CPUS;
+        context[i].data = 0;
+    }
+    for (unsigned i = 0; i < x86_num_cpus; ++i) {
+        printf("PT: pre start check: cpu %u, context cpu %u\n", i, context[i].cpu);
+    }
+
+    mp_sync_exec(MP_CPU_ALL, x86_pt_start_task, context);
+
+    for (unsigned i = 0; i < x86_num_cpus; ++i) {
+        printf("PT: start check: cpu %u, context cpu %u\n", i, context[i].cpu);
+        printf("PT: start check: cpu %u, from task 0x%llx, from data 0x%llx\n",
+               i, (long long unsigned) context[i].data,
+               (long long unsigned) vaddr_to_paddr(pt_data[i].table_ptrs_[0]));
+    }
+
     return NO_ERROR;
 }
 
 static void x86_pt_stop_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(raw_context == nullptr);
+    //DEBUG_ASSERT(raw_context == nullptr);
+
+    task_context* context = static_cast<task_context*>(raw_context);
 
     // Disable the trace
     write_msr(IA32_RTIT_CTL, 0);
 
+    uint32_t cpu = arch_curr_cpu_num();
     x86_percpu* xpc = x86_get_percpu();
     x86_cpu_pt_data* ptd = xpc->pt_data;
     DEBUG_ASSERT(ptd);
+    DEBUG_ASSERT(ptd == &pt_data[cpu]);
 
     // Save info we care about for output
     ptd->curr_table_ = read_msr(IA32_RTIT_OUTPUT_BASE);
@@ -481,6 +525,9 @@ static void x86_pt_stop_task(void* raw_context) {
 
     xpc->pt_data = nullptr;
 
+    context[cpu].cpu = cpu;
+    context[cpu].data = ptd->curr_table_;
+
     // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
 }
 
@@ -490,7 +537,20 @@ status_t x86_processor_trace_stop() {
     if (!pt_data)
         return ERR_BAD_STATE;
 
-    //mp_sync_exec(MP_CPU_ALL, x86_pt_stop_task, nullptr);
+    task_context context[x86_num_cpus];
+    for (unsigned i = 0; i < x86_num_cpus; ++i) {
+        context[i].cpu = SMP_MAX_CPUS;
+        context[i].data = 0;
+    }
+
+    mp_sync_exec(MP_CPU_ALL, x86_pt_stop_task, context);
+
+    for (unsigned i = 0; i < x86_num_cpus; ++i) {
+        printf("PT: stop check: cpu %u, context cpu %u\n", i, context[i].cpu);
+        printf("PT: stop check: cpu %u, from task 0x%llx\n",
+               i, (long long unsigned) context[i].data);
+    }
+
     active = false;
     return NO_ERROR;
 }
