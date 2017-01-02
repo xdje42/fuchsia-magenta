@@ -103,7 +103,7 @@ void x86_init_percpu(uint8_t cpu_num)
     x86_extended_register_init();
     x86_extended_register_enable_feature(X86_EXTENDED_REGISTER_SSE);
     x86_extended_register_enable_feature(X86_EXTENDED_REGISTER_AVX);
-    x86_extended_register_enable_feature(X86_EXTENDED_REGISTER_PT);
+    //x86_extended_register_enable_feature(X86_EXTENDED_REGISTER_PT); xyzdje
 
     idt_setup(&percpu->idt);
     idt_load(&percpu->idt);
