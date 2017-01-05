@@ -14,7 +14,7 @@ MODULES += \
     lib/userboot \
     lib/debuglog \
     lib/ktrace \
-    lib/perf \
+    lib/mtrace \
 
 # include all core, uapp, udev, ulib and utest from system/...
 MODULES += $(patsubst %/rules.mk,%,$(wildcard system/core/*/rules.mk))

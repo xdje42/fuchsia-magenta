@@ -701,7 +701,7 @@ extern mx_status_t _mx_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
-extern mx_status_t mx_perf_read(
+extern mx_status_t mx_mtrace_read(
     mx_handle_t handle,
     uint32_t action,
     void* data,
@@ -709,7 +709,7 @@ extern mx_status_t mx_perf_read(
     size_t len,
     size_t actual[1]);
 
-extern mx_status_t _mx_perf_read(
+extern mx_status_t _mx_mtrace_read(
     mx_handle_t handle,
     uint32_t action,
     void* data,
@@ -717,13 +717,13 @@ extern mx_status_t _mx_perf_read(
     size_t len,
     size_t actual[1]);
 
-extern mx_status_t mx_perf_control(
+extern mx_status_t mx_mtrace_control(
     mx_handle_t handle,
     uint32_t action,
     uint32_t options,
     void* ptr);
 
-extern mx_status_t _mx_perf_control(
+extern mx_status_t _mx_mtrace_control(
     mx_handle_t handle,
     uint32_t action,
     uint32_t options,

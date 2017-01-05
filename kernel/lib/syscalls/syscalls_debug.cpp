@@ -21,7 +21,7 @@
 #include <lib/user_copy.h>
 #include <lib/user_copy/user_ptr.h>
 #include <lib/ktrace.h>
-#include <lib/perf.h>
+#include <lib/mtrace.h>
 
 #include <lk/init.h>
 #include <platform/debug.h>
@@ -280,8 +280,8 @@ mx_status_t sys_ktrace_write(mx_handle_t handle, uint32_t event_id, uint32_t arg
     return NO_ERROR;
 }
 
-mx_status_t sys_perf_read(mx_handle_t handle, uint32_t action, void* _data,
-                          size_t offset, size_t len, size_t* _actual) {
+mx_status_t sys_mtrace_read(mx_handle_t handle, uint32_t action, void* _data,
+                            size_t offset, size_t len, size_t* _actual) {
     mx_status_t status;
 
 #if 0 // FIXME: wip
@@ -292,15 +292,15 @@ mx_status_t sys_perf_read(mx_handle_t handle, uint32_t action, void* _data,
 #endif
 
     size_t actual;
-    status = perf_read(action, _data, offset, len, &actual);
+    status = mtrace_read(action, _data, offset, len, &actual);
     if (status < 0)
         return status;
 
     return make_user_ptr(_actual).copy_to_user(actual);
 }
 
-mx_status_t sys_perf_control(mx_handle_t handle, uint32_t action,
-                             uint32_t options, void* _ptr) {
+mx_status_t sys_mtrace_control(mx_handle_t handle, uint32_t action,
+                               uint32_t options, void* _ptr) {
 #if 0 // FIXME: wip
     // TODO: finer grained validation
     mx_status_t status;
@@ -309,7 +309,7 @@ mx_status_t sys_perf_control(mx_handle_t handle, uint32_t action,
     }
 #endif
 
-    return perf_control(action, options, _ptr);
+    return mtrace_control(action, options, _ptr);
 }
 
 mx_status_t sys_thread_read_state(mx_handle_t handle, uint32_t state_kind,

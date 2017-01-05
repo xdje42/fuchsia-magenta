@@ -8,14 +8,13 @@
 
 #include <err.h>
 #include <magenta/compiler.h>
-#include <magenta/perf.h>
 #include <stdint.h>
 
 __BEGIN_CDECLS
 
-status_t perf_control(uint32_t action, uint32_t options, void* arg);
+status_t mtrace_control(uint32_t action, uint32_t options, void* arg);
 
-int perf_read(uint32_t action, void* ptr, size_t off, size_t len,
-              size_t* actual);
+int mtrace_read(uint32_t action, void* ptr, size_t off, size_t len,
+                size_t* actual);
 
 __END_CDECLS
