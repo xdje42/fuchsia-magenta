@@ -64,8 +64,8 @@ m_syscall 4 mx_log_read 63
 m_syscall 5 mx_ktrace_read 64
 m_syscall 4 mx_ktrace_control 65
 m_syscall 4 mx_ktrace_write 66
-m_syscall 6 mx_perf_read 67
-m_syscall 4 mx_perf_control 68
+m_syscall 6 mx_mtrace_read 67
+m_syscall 4 mx_mtrace_control 68
 m_syscall 2 mx_debug_transfer_handle 69
 m_syscall 3 mx_debug_read 70
 m_syscall 2 mx_debug_write 71

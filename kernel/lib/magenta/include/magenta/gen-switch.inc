@@ -127,9 +127,9 @@
        break;
     case 66: sfunc = reinterpret_cast<syscall_func>(sys_ktrace_write);
        break;
-    case 67: sfunc = reinterpret_cast<syscall_func>(sys_perf_read);
+    case 67: sfunc = reinterpret_cast<syscall_func>(sys_mtrace_read);
        break;
-    case 68: sfunc = reinterpret_cast<syscall_func>(sys_perf_control);
+    case 68: sfunc = reinterpret_cast<syscall_func>(sys_mtrace_control);
        break;
     case 69: sfunc = reinterpret_cast<syscall_func>(sys_debug_transfer_handle);
        break;

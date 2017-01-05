@@ -363,7 +363,7 @@ mx_status_t sys_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
-mx_status_t sys_perf_read(
+mx_status_t sys_mtrace_read(
     mx_handle_t handle,
     uint32_t action,
     void* data,
@@ -371,7 +371,7 @@ mx_status_t sys_perf_read(
     size_t len,
     size_t actual[1]);
 
-mx_status_t sys_perf_control(
+mx_status_t sys_mtrace_control(
     mx_handle_t handle,
     uint32_t action,
     uint32_t options,

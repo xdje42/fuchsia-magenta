@@ -9,6 +9,6 @@ LOCAL_DIR := $(GET_LOCAL_DIR)
 MODULE := $(LOCAL_DIR)
 
 MODULE_SRCS += \
-	$(LOCAL_DIR)/perf.cpp
+	$(LOCAL_DIR)/mtrace.cpp
 
 include make/module.mk
