@@ -281,36 +281,16 @@ mx_status_t sys_ktrace_write(mx_handle_t handle, uint32_t event_id, uint32_t arg
     return NO_ERROR;
 }
 
-mx_status_t sys_mtrace_read(mx_handle_t handle, uint32_t action, void* _data,
-                            size_t offset, size_t len, size_t* _actual) {
-    mx_status_t status;
-
-#if 0 // FIXME: wip
-    // TODO: finer grained validation
-    if ((status = validate_resource_handle(handle)) < 0) {
-        return status;
-    }
-#endif
-
-    size_t actual;
-    status = mtrace_read(action, _data, offset, len, &actual);
-    if (status < 0)
-        return status;
-
-    return make_user_ptr(_actual).copy_to_user(actual);
-}
-
-mx_status_t sys_mtrace_control(mx_handle_t handle, uint32_t action,
-                               uint32_t options, void* _ptr) {
-#if 0 // FIXME: wip
+mx_status_t sys_mtrace_control(mx_handle_t handle, uint32_t kind,
+                               uint32_t action, uint32_t options,
+                               void* _ptr, uint32_t size) {
     // TODO: finer grained validation
     mx_status_t status;
     if ((status = validate_resource_handle(handle)) < 0) {
         return status;
     }
-#endif
 
-    return mtrace_control(action, options, _ptr);
+    return mtrace_control(kind, action, options, _ptr, size);
 }
 
 mx_status_t sys_thread_read_state(mx_handle_t handle, uint32_t state_kind,

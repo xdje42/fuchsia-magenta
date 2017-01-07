@@ -12,9 +12,12 @@
 
 __BEGIN_CDECLS
 
-status_t mtrace_control(uint32_t action, uint32_t options, void* arg);
+status_t mtrace_control(uint32_t kind, uint32_t action, uint32_t options,
+                        void* arg, uint32_t size);
 
-int mtrace_read(uint32_t action, void* ptr, size_t off, size_t len,
-                size_t* actual);
+#ifdef __x86_64__
+status_t mtrace_ipt_control(uint32_t kind, uint32_t action, uint32_t options,
+                            void* arg, uint32_t size);
+#endif
 
 __END_CDECLS
