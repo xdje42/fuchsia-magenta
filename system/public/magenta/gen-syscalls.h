@@ -701,33 +701,21 @@ extern mx_status_t _mx_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
-extern mx_status_t mx_mtrace_read(
-    mx_handle_t handle,
-    uint32_t action,
-    void* data,
-    size_t offset,
-    size_t len,
-    size_t actual[1]);
-
-extern mx_status_t _mx_mtrace_read(
-    mx_handle_t handle,
-    uint32_t action,
-    void* data,
-    size_t offset,
-    size_t len,
-    size_t actual[1]);
-
 extern mx_status_t mx_mtrace_control(
     mx_handle_t handle,
+    uint32_t kind,
     uint32_t action,
     uint32_t options,
-    void* ptr);
+    void* ptr,
+    uint32_t size);
 
 extern mx_status_t _mx_mtrace_control(
     mx_handle_t handle,
+    uint32_t kind,
     uint32_t action,
     uint32_t options,
-    void* ptr);
+    void* ptr,
+    uint32_t size);
 
 extern mx_status_t mx_thread_arch_prctl(
     mx_handle_t handle,
@@ -834,11 +822,13 @@ extern mx_status_t _mx_io_mapping_get_info(
 extern mx_status_t mx_vmo_create_contiguous(
     mx_handle_t rsrc_handle,
     size_t size,
+    uint8_t alignment_log2,
     mx_handle_t out[1]);
 
 extern mx_status_t _mx_vmo_create_contiguous(
     mx_handle_t rsrc_handle,
     size_t size,
+    uint8_t alignment_log2,
     mx_handle_t out[1]);
 
 extern mx_status_t mx_vmar_allocate(

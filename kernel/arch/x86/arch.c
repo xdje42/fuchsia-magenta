@@ -57,6 +57,8 @@ void arch_init(void)
     x86_feature_debug();
 
     x86_mmu_init();
+
+    extern void x86_processor_trace_init(void); // TODO(dje): wip
     x86_processor_trace_init();
 }
 

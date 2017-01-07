@@ -39,7 +39,7 @@ static mx_status_t io_buffer_init_common(io_buffer_t* buffer, mx_handle_t vmo_ha
     return NO_ERROR;
 }
 
-mx_status_t io_buffer_init(io_buffer_t* buffer, size_t size, uint32_t flags) {
+mx_status_t io_buffer_init_aligned(io_buffer_t* buffer, size_t size, uint8_t alignment_log2, uint32_t flags) {
     if (size == 0) {
         return ERR_INVALID_ARGS;
     }
@@ -48,13 +48,17 @@ mx_status_t io_buffer_init(io_buffer_t* buffer, size_t size, uint32_t flags) {
     }
 
     mx_handle_t vmo_handle;
-    mx_status_t status = mx_vmo_create_contiguous(get_root_resource(), size, &vmo_handle);
+    mx_status_t status = mx_vmo_create_contiguous(get_root_resource(), size, alignment_log2, &vmo_handle);
     if (status != NO_ERROR) {
         printf("io_buffer: mx_vmo_create failed %d\n", vmo_handle);
         return status;
     }
 
     return io_buffer_init_common(buffer, vmo_handle, size, 0, flags);
+}
+
+mx_status_t io_buffer_init(io_buffer_t* buffer, size_t size, uint32_t flags) {
+    return io_buffer_init_aligned(buffer, size, PAGE_SIZE_SHIFT, flags);
 }
 
 mx_status_t io_buffer_init_vmo(io_buffer_t* buffer, mx_handle_t vmo_handle, mx_off_t offset,

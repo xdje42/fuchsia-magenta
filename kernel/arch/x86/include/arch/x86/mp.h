@@ -66,9 +66,6 @@ struct x86_percpu {
     /* This CPU's default TSS */
     tss_t __ALIGNED(16) default_tss;
 
-    /* processor trace data */
-    struct x86_cpu_pt_data* pt_data;
-
     /* The IDT for this CPU */
     struct idt idt;
 #ifdef ARCH_X86_64

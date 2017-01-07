@@ -351,19 +351,13 @@ mx_status_t sys_ktrace_write(
     uint32_t arg0,
     uint32_t arg1);
 
-mx_status_t sys_mtrace_read(
-    mx_handle_t handle,
-    uint32_t action,
-    void* data,
-    size_t offset,
-    size_t len,
-    size_t actual[1]);
-
 mx_status_t sys_mtrace_control(
     mx_handle_t handle,
+    uint32_t kind,
     uint32_t action,
     uint32_t options,
-    void* ptr);
+    void* ptr,
+    uint32_t size);
 
 mx_status_t sys_thread_arch_prctl(
     mx_handle_t handle,
@@ -419,6 +413,7 @@ mx_status_t sys_io_mapping_get_info(
 mx_status_t sys_vmo_create_contiguous(
     mx_handle_t rsrc_handle,
     size_t size,
+    uint8_t alignment_log2,
     mx_handle_t out[1]);
 
 mx_status_t sys_vmar_allocate(
