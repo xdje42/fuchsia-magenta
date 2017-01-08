@@ -12,7 +12,9 @@
 
 __BEGIN_CDECLS
 
-status_t mtrace_control(uint32_t kind, uint32_t action, uint32_t options,
-                        void* arg, uint32_t size);
+void x86_processor_trace_init(void);
+
+status_t mtrace_ipt_control(uint32_t action, uint32_t options,
+                            void* arg, uint32_t size);
 
 __END_CDECLS
