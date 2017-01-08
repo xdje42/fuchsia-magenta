@@ -86,11 +86,12 @@ IOCTL_WRAPPER_VARIN(ioctl_ipt_write_file, IOCTL_IPT_WRITE_FILE, char);
 // Encode/decode options values for mtrace_control().
 // At present we just encode the cpu number here.
 // We only support 32 cpus at the moment, the extra bit is for magic values.
-#define MTRACE_IPT_OPTIONS(cpu) (((cpu) & 0x3f) + 0)
+#define MTRACE_IPT_OPTIONS_CPU_MASK 0x3f
+#define MTRACE_IPT_OPTIONS(cpu) (((cpu) & MTRACE_IPT_OPTIONS_CPU_MASK) + 0)
 
 // TODO(dje): a static assert that this is big enough would be nice
 #define MTRACE_IPT_ALL_CPUS 32
 
-#define MTRACE_IPT_OPTIONS_CPU(options) ((options) & 0x3f)
+#define MTRACE_IPT_OPTIONS_CPU(options) ((options) & MTRACE_IPT_OPTIONS_CPU_MASK)
 
 __END_CDECLS
