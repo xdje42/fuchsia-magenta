@@ -484,7 +484,7 @@ static mx_status_t x86_pt_start(ipt_device_t* ipt_dev) {
             return status;
 
         uint64_t output_mask_ptrs = 0;
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_STATUS,
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS,
                                    cpu, &output_mask_ptrs, sizeof(output_mask_ptrs));
         if (status != NO_ERROR)
             return status;
@@ -520,17 +520,17 @@ static mx_status_t x86_pt_stop(ipt_device_t* ipt_dev) {
         if (status != NO_ERROR)
             return status;
 
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_STATUS,
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_STATUS,
                                    cpu, &per_cpu->status, sizeof(per_cpu->status));
         if (status != NO_ERROR)
             return status;
 
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_OUTPUT_BASE,
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_OUTPUT_BASE,
                                    cpu, &per_cpu->output_base, sizeof(per_cpu->output_base));
         if (status != NO_ERROR)
             return status;
 
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_STATUS,
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_OUTPUT_MASK_PTRS,
                                    cpu, &per_cpu->output_mask_ptrs, sizeof(per_cpu->output_mask_ptrs));
         if (status != NO_ERROR)
             return status;

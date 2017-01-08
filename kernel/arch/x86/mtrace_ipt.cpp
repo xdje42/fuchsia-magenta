@@ -278,6 +278,9 @@ static status_t mtrace_ipt_stage_msr(uint32_t action, uint32_t options,
     uint32_t num_cpus = arch_max_num_cpus();
     uint32_t options_cpu = MTRACE_IPT_OPTIONS_CPU(options);
 
+    if ((options & ~MTRACE_IPT_OPTIONS_CPU_MASK) != 0)
+        return ERR_INVALID_ARGS;
+
     if (options_cpu < num_cpus) {
         mtrace_ipt_stage_msr1(action, options_cpu, value);
     } else if (options_cpu == MTRACE_IPT_ALL_CPUS) {
@@ -293,15 +296,15 @@ static status_t mtrace_ipt_stage_msr(uint32_t action, uint32_t options,
 
 static uint64_t mtrace_ipt_get_msr1(uint32_t action, uint32_t cpu) {
     switch (action) {
-    case MTRACE_IPT_STAGE_CTL:
+    case MTRACE_IPT_GET_CTL:
         return ipt_state[cpu].ctl;
-    case MTRACE_IPT_STAGE_STATUS:
+    case MTRACE_IPT_GET_STATUS:
         return ipt_state[cpu].status;
-    case MTRACE_IPT_STAGE_OUTPUT_BASE:
+    case MTRACE_IPT_GET_OUTPUT_BASE:
         return ipt_state[cpu].output_base;
-    case MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS:
+    case MTRACE_IPT_GET_OUTPUT_MASK_PTRS:
         return ipt_state[cpu].output_mask_ptrs;
-    case MTRACE_IPT_STAGE_CR3_MATCH:
+    case MTRACE_IPT_GET_CR3_MATCH:
         return ipt_state[cpu].cr3_match;
     default:
         DEBUG_ASSERT(false);
@@ -313,6 +316,9 @@ static status_t mtrace_ipt_get_msr(uint32_t action, uint32_t options,
     uint32_t num_cpus = arch_max_num_cpus();
     uint32_t options_cpu = MTRACE_IPT_OPTIONS_CPU(options);
 
+    if ((options & ~MTRACE_IPT_OPTIONS_CPU_MASK) != 0)
+        return ERR_INVALID_ARGS;
+
     if (options_cpu < num_cpus) {
         *value = mtrace_ipt_get_msr1(action, options_cpu);
         return NO_ERROR;
@@ -323,6 +329,9 @@ static status_t mtrace_ipt_get_msr(uint32_t action, uint32_t options,
 
 status_t mtrace_ipt_control(uint32_t action, uint32_t options,
                             void* arg, uint32_t size) {
+    TRACEF("action %u, options 0x%x, arg %p, size 0x%x\n",
+           action, options, arg, size);
+
     switch (action) {
     case MTRACE_IPT_STAGE_CTL:
     case MTRACE_IPT_STAGE_STATUS:
@@ -336,7 +345,7 @@ status_t mtrace_ipt_control(uint32_t action, uint32_t options,
         if (size != sizeof(uint64_t))
             return ERR_INVALID_ARGS;
         uint64_t value;
-        if (arch_copy_from_user(arg, &value, size) != NO_ERROR)
+        if (arch_copy_from_user(&value, arg, size) != NO_ERROR)
             return ERR_INVALID_ARGS;
         return mtrace_ipt_stage_msr(action, options, value);
     }
