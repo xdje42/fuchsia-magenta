@@ -162,6 +162,8 @@ mx_status_t sys_vmo_create_contiguous(mx_handle_t hrsrc, size_t size,
     LTRACEF("size 0x%zu\n", size);
 
     if (size == 0) return ERR_INVALID_ARGS;
+    if (alignment_log2 == 0)
+        alignment_log2 = PAGE_SIZE_SHIFT;
     if (alignment_log2 < PAGE_SIZE_SHIFT) return ERR_INVALID_ARGS;
 
     // TODO: finer grained validation

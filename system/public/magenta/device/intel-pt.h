@@ -38,10 +38,12 @@ IOCTL_WRAPPER(ioctl_ipt_stop, IOCTL_IPT_STOP);
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 4)
 IOCTL_WRAPPER(ioctl_ipt_free, IOCTL_IPT_FREE);
 
-// fetch the amount of data collected, in bytes
-#define IOCTL_IPT_GET_DATA_SIZE \
+// write collected data to a file
+// TODO(dje): This is just to get things going. At the moment all
+// post-processing is done after tracing is complete.
+#define IOCTL_IPT_WRITE_FILE \
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 5)
-IOCTL_WRAPPER_OUT(ioctl_ipt_get_data_size, IOCTL_IPT_GET_DATA_SIZE, size_t);
+IOCTL_WRAPPER_VARIN(ioctl_ipt_write_file, IOCTL_IPT_WRITE_FILE, char);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -63,7 +65,7 @@ IOCTL_WRAPPER_OUT(ioctl_ipt_get_data_size, IOCTL_IPT_GET_DATA_SIZE, size_t);
 // can crash the system in various other ways so we leave it to the driver to
 // get right.
 #define MTRACE_IPT_STAGE_CTL 0
-#define MTRACE_IPT_STATE_STATUS 1
+#define MTRACE_IPT_STAGE_STATUS 1
 #define MTRACE_IPT_STAGE_OUTPUT_BASE 2
 #define MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS 3
 #define MTRACE_IPT_STAGE_CR3_MATCH 4

@@ -48,6 +48,29 @@
 #define IA32_RTIT_ADDR3_A 0x586
 #define IA32_RTIT_ADDR3_B 0x587
 
+// Macros for building IA32_RTIT_CTL values
+#define RTIT_CTL_TRACE_EN (1ULL<<0)
+#define RTIT_CTL_CYC_EN (1ULL<<1)
+#define RTIT_CTL_OS_ALLOWED (1ULL<<2)
+#define RTIT_CTL_USER_ALLOWED (1ULL<<3)
+#define RTIT_CTL_POWER_EVENT_EN (1ULL<<4)
+#define RTIT_CTL_FUP_ON_PTW (1ULL<<5)
+#define RTIT_CTL_FABRIC_EN (1ULL<<6)
+#define RTIT_CTL_CR3_FILTER (1ULL<<7)
+#define RTIT_CTL_TOPA (1ULL<<8)
+#define RTIT_CTL_MTC_EN (1ULL<<9)
+#define RTIT_CTL_TSC_EN (1ULL<<10)
+#define RTIT_CTL_DIS_RETC (1ULL<<11)
+#define RTIT_CTL_PTW_EN (1ULL<<12)
+#define RTIT_CTL_BRANCH_EN (1ULL<<13)
+
+// Masks for reading IA32_RTIT_STATUS
+#define RTIT_STATUS_FILTER_EN (1ULL<<0)
+#define RTIT_STATUS_CONTEXT_EN (1ULL<<1)
+#define RTIT_STATUS_TRIGGER_EN (1ULL<<2)
+#define RTIT_STATUS_ERROR (1ULL<<4)
+#define RTIT_STATUS_STOPPED (1ULL<<5)
+
 // Our own copy of what h/w supports, mostly for sanity checking.
 static bool supports_cr3_filtering = false;
 static bool supports_psb = false;
@@ -60,7 +83,7 @@ static bool supports_output_topa_multi = false;
 static bool supports_output_single = false;
 static bool supports_output_transport = false;
 
-struct ipt_state {
+struct ipt_state_t {
     uint64_t ctl;
     uint64_t status;
     uint64_t output_base;
@@ -68,7 +91,7 @@ struct ipt_state {
     uint64_t cr3_match;
 };
 
-static ipt_state* ipt_state;
+static ipt_state_t* ipt_state;
 
 static bool active = false;
 
@@ -83,12 +106,14 @@ void x86_processor_trace_init(void)
         return;
     }
 
+    // Keep our own copy of these flags, mostly for potential sanity checks.
     supports_cr3_filtering = !!(leaf.b & (1<<0));
     supports_psb = !!(leaf.b & (1<<1));
     supports_ip_filtering = !!(leaf.b & (1<<2));
     supports_mtc = !!(leaf.b & (1<<3));
     supports_ptwrite = !!(leaf.b & (1<<4));
     supports_power_events = !!(leaf.b & (1<<5));
+
     supports_output_topa = !!(leaf.c & (1<<0));
     supports_output_topa_multi = !!(leaf.c & (1<<1));
     supports_output_single = !!(leaf.c & (1<<2));
@@ -100,11 +125,11 @@ void x86_processor_trace_init(void)
 
 // Returns nullptr on malloc failure.
 
-static ipt_state* get_ipt_state() {
+static ipt_state_t* get_ipt_state() {
     if (!ipt_state) {
         uint32_t num_cpus = arch_max_num_cpus();
-        ipt_state = reinterpret_cast<ipt_state*>(calloc(num_cpus,
-                                                        sizeof(*ipt_state)));
+        ipt_state = reinterpret_cast<ipt_state_t*>(calloc(num_cpus,
+                                                          sizeof(*ipt_state)));
     }
     return ipt_state;
 }
@@ -140,9 +165,9 @@ static void mtrace_ipt_start_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(active && raw_context);
 
-    ipt_state* context = reinterpret_case<ipt_state*>(raw_context);
+    ipt_state_t* context = reinterpret_cast<ipt_state_t*>(raw_context);
     uint32_t cpu = arch_curr_cpu_num();
-    ipt_state* state = &context[cpu];
+    ipt_state_t* state = &context[cpu];
 
     DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN) &&
                  !(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
@@ -188,9 +213,9 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(raw_context);
 
-    ipt_state* context = reinterpret_case<ipt_state*>(raw_context);
+    ipt_state_t* context = reinterpret_cast<ipt_state_t*>(raw_context);
     uint32_t cpu = arch_curr_cpu_num();
-    ipt_state* state = &context[cpu];
+    ipt_state_t* state = &context[cpu];
 
     // Disable the trace
     write_msr(IA32_RTIT_CTL, 0);
@@ -198,7 +223,7 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     // Retrieve msr values for later providing to userspace
     state->ctl = 0;
     state->status = read_msr(IA32_RTIT_STATUS);
-    state->output_base_ = read_msr(IA32_RTIT_OUTPUT_BASE);
+    state->output_base = read_msr(IA32_RTIT_OUTPUT_BASE);
     state->output_mask_ptrs = read_msr(IA32_RTIT_OUTPUT_MASK_PTRS);
     state->cr3_match = read_msr(IA32_RTIT_CR3_MATCH);
 
@@ -231,7 +256,7 @@ static void mtrace_ipt_stage_msr1(uint32_t action, uint32_t cpu,
     case MTRACE_IPT_STAGE_CTL:
         ipt_state[cpu].ctl = value;
         break;
-    case MTRACE_IPT_STATE_STATUS:
+    case MTRACE_IPT_STAGE_STATUS:
         ipt_state[cpu].status = value;
         break;
     case MTRACE_IPT_STAGE_OUTPUT_BASE:
@@ -270,7 +295,7 @@ static uint64_t mtrace_ipt_get_msr1(uint32_t action, uint32_t cpu) {
     switch (action) {
     case MTRACE_IPT_STAGE_CTL:
         return ipt_state[cpu].ctl;
-    case MTRACE_IPT_STATE_STATUS:
+    case MTRACE_IPT_STAGE_STATUS:
         return ipt_state[cpu].status;
     case MTRACE_IPT_STAGE_OUTPUT_BASE:
         return ipt_state[cpu].output_base;
@@ -296,16 +321,18 @@ static status_t mtrace_ipt_get_msr(uint32_t action, uint32_t options,
     return ERR_INVALID_ARGS;
 }
 
-status_t mtrace_ipt_control(uint32_t kind, uint32_t action, uint32_t options,
+status_t mtrace_ipt_control(uint32_t action, uint32_t options,
                             void* arg, uint32_t size) {
-    DEBUG_ASSERT(kind == MTRACE_KIND_IPT);
-
     switch (action) {
     case MTRACE_IPT_STAGE_CTL:
-    case MTRACE_IPT_STATE_STATUS:
+    case MTRACE_IPT_STAGE_STATUS:
     case MTRACE_IPT_STAGE_OUTPUT_BASE:
     case MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS:
     case MTRACE_IPT_STAGE_CR3_MATCH: {
+        if (active)
+            return ERR_BAD_STATE;
+        if (!ipt_state)
+            return ERR_BAD_STATE;
         if (size != sizeof(uint64_t))
             return ERR_INVALID_ARGS;
         uint64_t value;
@@ -319,6 +346,10 @@ status_t mtrace_ipt_control(uint32_t kind, uint32_t action, uint32_t options,
     case MTRACE_IPT_GET_OUTPUT_BASE:
     case MTRACE_IPT_GET_OUTPUT_MASK_PTRS:
     case MTRACE_IPT_GET_CR3_MATCH: {
+        if (active)
+            return ERR_BAD_STATE;
+        if (!ipt_state)
+            return ERR_BAD_STATE;
         if (size != sizeof(uint64_t))
             return ERR_INVALID_ARGS;
         uint64_t value;
@@ -331,12 +362,20 @@ status_t mtrace_ipt_control(uint32_t kind, uint32_t action, uint32_t options,
     }
 
     case MTRACE_IPT_ALLOC:
+        if (options != 0 || size != 0)
+            return ERR_INVALID_ARGS;
         return mtrace_ipt_alloc();
     case MTRACE_IPT_START:
+        if (options != 0 || size != 0)
+            return ERR_INVALID_ARGS;
         return mtrace_ipt_start();
     case MTRACE_IPT_STOP:
+        if (options != 0 || size != 0)
+            return ERR_INVALID_ARGS;
         return mtrace_ipt_stop();
     case MTRACE_IPT_FREE:
+        if (options != 0 || size != 0)
+            return ERR_INVALID_ARGS;
         return mtrace_ipt_free();
 
     default:

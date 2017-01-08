@@ -24,7 +24,7 @@
 #include <arch/x86/mmu.h>
 #include <arch/x86/mmu_mem_types.h>
 #include <arch/x86/mp.h>
-#include <arch/x86/processor_trace.h>
+#include <arch/x86/mtrace_ipt.h>
 #include <arch/mmu.h>
 #include <kernel/vm.h>
 #include <lib/console.h>
@@ -58,7 +58,6 @@ void arch_init(void)
 
     x86_mmu_init();
 
-    extern void x86_processor_trace_init(void); // TODO(dje): wip
     x86_processor_trace_init();
 }
 

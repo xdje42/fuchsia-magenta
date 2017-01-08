@@ -58,7 +58,7 @@ mx_status_t io_buffer_init_aligned(io_buffer_t* buffer, size_t size, uint8_t ali
 }
 
 mx_status_t io_buffer_init(io_buffer_t* buffer, size_t size, uint32_t flags) {
-    return io_buffer_init_aligned(buffer, size, PAGE_SIZE_SHIFT, flags);
+    return io_buffer_init_aligned(buffer, size, 0/*PAGE_SIZE_SHIFT*/, flags);
 }
 
 mx_status_t io_buffer_init_vmo(io_buffer_t* buffer, mx_handle_t vmo_handle, mx_off_t offset,
