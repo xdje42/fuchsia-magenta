@@ -137,6 +137,14 @@ static mx_handle_t logger = MX_HANDLE_INVALID;
 
 struct debug* _dl_debug_addr = &debug;
 
+// If non-NULL, loads/unloads are written to this file in a specific format
+// for tracing and performance analysis tools.
+static const char* trace_file_name;
+// If non-NULL, the result of fopen(trace_file_name, "a").
+// This is used to optimize tracing of multiple loads, e.g., at program
+// startup. wip.
+static FILE* trace_file;
+
 __attribute__((__visibility__("hidden"))) void (*const __init_array_start)(void) = 0,
                                                        (*const __fini_array_start)(void) = 0;
 
@@ -856,6 +864,58 @@ static struct dso* find_library(const char* name) {
     return p;
 }
 
+static void trace_load(struct dso* p) {
+    if (!trace_file_name)
+        return;
+
+    static mx_koid_t pid = MX_KOID_INVALID;
+    if (pid == MX_KOID_INVALID) {
+        mx_info_handle_basic_t process_info;
+        if (mx_object_get_info(__magenta_process_self,
+                               MX_INFO_HANDLE_BASIC,
+                               &process_info, sizeof(process_info),
+                               NULL, NULL) == NO_ERROR) {
+            pid = process_info.koid;
+        } else {
+            // No point in continually calling mx_object_get_info.
+            // The first 100 are reserved.
+            pid = 1;
+        }
+    }
+
+#if 0 // wip
+    bool already_opened = !!trace_file;
+    if (!trace_file) {
+        trace_file = fopen(trace_file_name, "a");
+        if (!trace_file) {
+            static bool warning_printed = false;
+            if (!warning_printed) {
+                debugmsg("Warning: Unable to write to trace file: %s, dso %s, errno %d",
+                      trace_file_name, p->name, errno);
+                warning_printed = true;
+            }
+        }
+    }
+
+    if (trace_file) {
+        // The format here is intended to be human readable and read by
+        // programs. Change this with care.
+        // TODO(dje): Handle spaces in names.
+        fprintf(trace_file, "trace_load: %" PRIu64 ": %p %s %s\n",
+                pid, p->base, p->soname, p->name);
+    }
+
+    if (!already_opened && trace_file) {
+        fclose(trace_file);
+        trace_file = NULL;
+    }
+#else
+    (void) trace_file;
+    debugmsg("trace_load: %" PRIu64 ": %p %s %s",
+             pid, p->base, p->soname, p->name);
+#endif
+}
+
 static struct dso* load_library_vmo(mx_handle_t vmo, const char* name,
                                     struct dso* needed_by) {
     unsigned char* map;
@@ -1300,6 +1360,8 @@ static void* dls3(mx_handle_t exec_vmo, int argc, char** argv) {
         const char* debug = getenv("LD_DEBUG");
         if (debug != NULL && debug[0] != '\0')
             log_libs = true;
+
+        trace_file_name = getenv("LD_TRACE_FILE");
     }
 
     if (exec_vmo == MX_HANDLE_INVALID) {
@@ -1465,6 +1527,12 @@ static void* dls3(mx_handle_t exec_vmo, int argc, char** argv) {
             else
                 debugmsg("Loaded at [%p,%p) bias %p: %s%s%s%s\n",
                          p->map, p->map + p->map_len, p->base, name, a, b, c);
+        }
+    }
+
+    if (trace_file_name) {
+        for (struct dso* p = &app; p != NULL; p = p->next) {
+            trace_load(p);
         }
     }
 
@@ -1653,6 +1721,9 @@ static void* dlopen_internal(mx_handle_t vmo, const char* file, int mode) {
 
     update_tls_size();
     _dl_debug_state();
+    if (trace_file_name) {
+        trace_load(p);
+    }
     orig_tail = tail;
 end:
     __release_ptc();
