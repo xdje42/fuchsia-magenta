@@ -206,8 +206,8 @@ static void x86_pt_init(void)
         ipt_config_addr_range_num = a1 & 0x3;
     }
 
-    unsigned a1 = 0, b1 = 0, c1 = 0, d1 = 0;
     if (max_leaf >= 0x15) {
+        unsigned a1 = 0, b1 = 0, c1 = 0, d1 = 0;
         __cpuid(0x15, a1, b1, c1, d1);
         if (a1 && b1)
             ipt_config_bus_freq = 1. / ((float)a1 / (float)b1);
@@ -596,28 +596,38 @@ static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
 
 static mx_status_t ipt_open(mx_device_t* dev, mx_device_t** dev_out, uint32_t flags) {
     // TODO(dje): What's the best way to allow only one open at a time?
+    // [We could allow multiple, but multiple clients trying to control
+    // tracing is problematic, and currently not supported.
     ipt_device_t* ipt_dev = get_ipt_device(dev);
     if (ipt_dev->opened)
         return ERR_ALREADY_BOUND;
 
-    if (ipt_dev->active)
-        return ERR_BAD_STATE;
-    if (ipt_dev->per_cpu_state)
+    if (ipt_dev->active && !ipt_dev->per_cpu_state)
         return ERR_BAD_STATE;
 
-    // TODO(dje): hotplugging/unplugging: later.
-    ipt_dev->num_cpus = mx_num_cpus();
+    if (!ipt_dev->active && !ipt_dev->per_cpu_state) {
+        // TODO(dje): hotplugging/unplugging: later.
+        ipt_dev->num_cpus = mx_num_cpus();
 
-    ipt_dev->per_cpu_state = calloc(ipt_dev->num_cpus, sizeof(ipt_dev->per_cpu_state[0]));
-    ipt_dev->num_tables = 0;
+        ipt_dev->per_cpu_state = calloc(ipt_dev->num_cpus, sizeof(ipt_dev->per_cpu_state[0]));
+        if (!ipt_dev->per_cpu_state)
+            return ERR_NO_MEMORY;
 
-    // reset values that have defaults
-    ipt_dev->num_buffers = DEFAULT_NUM_BUFFERS;
-    ipt_dev->buffer_order = DEFAULT_BUFFER_ORDER;
+        ipt_dev->num_tables = 0;
+
+        // reset values that have defaults
+        ipt_dev->num_buffers = DEFAULT_NUM_BUFFERS;
+        ipt_dev->buffer_order = DEFAULT_BUFFER_ORDER;
+    }
 
     ipt_dev->opened = true;
-    ipt_dev->active = false;
+    return NO_ERROR;
+}
 
+static mx_status_t ipt_close(mx_device_t* dev, uint32_t flags) {
+    ipt_device_t* ipt_dev = get_ipt_device(dev);
+
+    ipt_dev->opened = false;
     return NO_ERROR;
 }
 
@@ -728,13 +738,13 @@ static mx_status_t ipt_release(mx_device_t* dev) {
     // For now flag things as busted and prevent further use.
     x86_pt_stop(ipt_dev);
     x86_pt_free(ipt_dev);
-    ipt_dev->opened = false;
 
     return NO_ERROR;
 }
 
 static mx_protocol_device_t ipt_device_proto = {
     .open = ipt_open,
+    .close = ipt_close,
     .ioctl = ipt_ioctl,
     .release = ipt_release,
 };

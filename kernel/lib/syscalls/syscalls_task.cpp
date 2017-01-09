@@ -162,8 +162,11 @@ mx_status_t sys_process_create(mx_handle_t job_handle,
         return res;
 
     uint32_t koid = (uint32_t)proc_dispatcher->get_koid();
-    ktrace(TAG_PROC_CREATE, koid, 0, 0, 0);
-    ktrace_name(TAG_PROC_NAME, koid, 0, buf);
+    // aspace is used in conjunction with additional tools like Intel PT
+    uint64_t aspace = proc_dispatcher->aspace()->get_perf_aspace();
+    ktrace(TAG_PROC_CREATE, koid, 0 /*reserved for koid upper32*/,
+           (uint32_t)aspace, (uint32_t)(aspace >> 32));
+    ktrace_name(TAG_PROC_NAME, koid, 0 /*reserved for koid upper32*/, buf);
 
     //xyzdje
     TRACEF("Creating process \"%s\", koid %u, cr3 0x%" PRIxPTR "\n",

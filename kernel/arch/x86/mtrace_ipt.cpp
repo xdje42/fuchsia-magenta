@@ -169,8 +169,13 @@ static void mtrace_ipt_start_task(void* raw_context) {
     uint32_t cpu = arch_curr_cpu_num();
     ipt_state_t* state = &context[cpu];
 
-    DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN) &&
-                 !(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
+    DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN));
+#if 0
+    // TODO(dje): Seems like this may be preserved across reboots. True?
+    // There's no real need for this test, we've already verified tracing is
+    // currently disabled, so disable this check for now.
+    DEBUG_ASSERT(!(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
+#endif
 
     // Load the ToPA configuration
     write_msr(IA32_RTIT_OUTPUT_BASE, state->output_base);
@@ -239,6 +244,8 @@ static void mtrace_ipt_stop_task(void* raw_context) {
 }
 
 static status_t mtrace_ipt_stop() {
+    TRACEF("Disabling processor trace\n");
+
     if (!active)
         return ERR_BAD_STATE;
     if (!ipt_state)
