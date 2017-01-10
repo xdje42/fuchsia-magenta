@@ -864,6 +864,55 @@ static struct dso* find_library(const char* name) {
     return p;
 }
 
+#define MAX_BUILDID_SIZE 64
+
+static void read_buildid(struct dso* p, char* buf, size_t buf_size) {
+    Phdr* ph = p->phdr;
+    size_t cnt;
+
+    for (cnt = p->phnum; cnt--; ph = (void*)((char*)ph + p->phentsize)) {
+        if (ph->p_type != PT_NOTE)
+            continue;
+
+        off_t off = ph->p_offset;
+        size_t size = ph->p_filesz;
+
+        struct {
+            Elf32_Nhdr hdr;
+            char name[sizeof("GNU")];
+        } hdr;
+
+        while (size > sizeof(hdr)) {
+            memcpy(&hdr, (char*)p->base + off, sizeof(hdr));
+            size_t header_size = sizeof(Elf32_Nhdr) + ((hdr.hdr.n_namesz + 3) & -4);
+            size_t payload_size = (hdr.hdr.n_descsz + 3) & -4;
+            off += header_size;
+            size -= header_size;
+            uint8_t* payload = (unsigned char*)p->base + off;
+            off += payload_size;
+            size -= payload_size;
+            if (hdr.hdr.n_type != NT_GNU_BUILD_ID ||
+                hdr.hdr.n_namesz != sizeof("GNU") ||
+                memcmp(hdr.name, "GNU", sizeof("GNU")) != 0) {
+                continue;
+            }
+            if (hdr.hdr.n_descsz > MAX_BUILDID_SIZE) {
+                // TODO(dje): Revisit.
+                snprintf(buf, buf_size, "build_id_too_large_%u", hdr.hdr.n_descsz);
+            } else {
+                for (size_t i = 0; i < hdr.hdr.n_descsz; ++i) {
+                    snprintf(&buf[i * 2], 3, "%02x", payload[i]);
+                }
+            }
+            return;
+        }
+    }
+
+    strcpy(buf, "<none>");
+}
+
+// Subroutine of trace_load to simplify it.
+
 static void trace_load(struct dso* p) {
     if (!trace_file_name)
         return;
@@ -883,7 +932,15 @@ static void trace_load(struct dso* p) {
         }
     }
 
-#if 0 // wip
+    // Compute extra values useful to tools.
+    // This is done here so that it's only done when necessary.
+    char buildid[MAX_BUILDID_SIZE * 2 + 1];
+    read_buildid(p, buildid, sizeof(buildid));
+
+    const char* name = p->name[0] == '\0' ? "<application>" : p->name;
+    const char* soname = p->soname == NULL ? "<application>" : p->soname;
+
+#if 0 // wip, need filesystem, looking for alternatives
     bool already_opened = !!trace_file;
     if (!trace_file) {
         trace_file = fopen(trace_file_name, "a");
@@ -891,7 +948,7 @@ static void trace_load(struct dso* p) {
             static bool warning_printed = false;
             if (!warning_printed) {
                 debugmsg("Warning: Unable to write to trace file: %s, dso %s, errno %d",
-                      trace_file_name, p->name, errno);
+                      trace_file_name, name, errno);
                 warning_printed = true;
             }
         }
@@ -901,8 +958,9 @@ static void trace_load(struct dso* p) {
         // The format here is intended to be human readable and read by
         // programs. Change this with care.
         // TODO(dje): Handle spaces in names.
-        fprintf(trace_file, "trace_load: %" PRIu64 ": %p %s %s\n",
-                pid, p->base, p->soname, p->name);
+        fprintf(trace_file, "trace_load: %" PRIu64 ": %p %p %p %s %s %s\n",
+                pid, p->base, p->map, p->map + p->map_len,
+                buildid, soname, name);
     }
 
     if (!already_opened && trace_file) {
@@ -911,8 +969,9 @@ static void trace_load(struct dso* p) {
     }
 #else
     (void) trace_file;
-    debugmsg("trace_load: %" PRIu64 ": %p %s %s",
-             pid, p->base, p->soname, p->name);
+    debugmsg("trace_load: %" PRIu64 ": %p %p %p %s %s %s",
+             pid, p->base, p->map, p->map + p->map_len,
+             buildid, soname, name);
 #endif
 }
 
