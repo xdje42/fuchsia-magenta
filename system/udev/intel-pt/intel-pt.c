@@ -149,13 +149,23 @@ static bool ipt_config_output_transport = false;
 static bool ipt_config_lip = false;
 
 // maximum space, in bytes, for trace buffers (per cpu)
-#define MAX_PER_CPU_SPACE (16 * 1024 * 1024)
+// This isn't necessarily
+// MAX_NUM_BUFFERS * (1 << (MAX_BUFFER_ORDER + PAGE_SIZE_SHIFT)).
+// Buffers have to be contiguous pages, but we can have a lot of them.
+// Supporting large buffers and/or lots of them is for experimentation.
+#define MAX_PER_CPU_SPACE (64 * 1024 * 1024)
 
 // default number of buffers, each 2^|buffer_order| pages in size
 #define DEFAULT_NUM_BUFFERS 16
 
+// maximum number of buffers
+#define MAX_NUM_BUFFERS 1024
+
 // log2 size of each buffer, in pages, default is 16KB
 #define DEFAULT_BUFFER_ORDER 2
+
+// maximum size of each buffer, in pages (1MB)
+#define MAX_BUFFER_ORDER 8
 
 #if PAGE_SIZE == 4096
 #define PAGE_SIZE_SHIFT 12
@@ -591,6 +601,20 @@ static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
     return NO_ERROR;
 }
 
+static mx_status_t x86_pt_set_buffer_order(ipt_device_t* ipt_dev, size_t order) {
+    if (order > MAX_BUFFER_ORDER)
+        return ERR_INVALID_ARGS;
+    ipt_dev->buffer_order = order;
+    return NO_ERROR;
+}
+
+static mx_status_t x86_pt_set_num_buffers(ipt_device_t* ipt_dev, size_t num) {
+    if (num == 0 || num > MAX_NUM_BUFFERS)
+        return ERR_INVALID_ARGS;
+    ipt_dev->num_buffers = num;
+    return NO_ERROR;
+}
+
 
 // The DDK interface
 
@@ -726,6 +750,24 @@ static ssize_t ipt_ioctl(mx_device_t* dev, uint32_t op,
         return x86_pt_free(ipt_dev);
     case IOCTL_IPT_WRITE_FILE:
         return ipt_write_file(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_SET_BUFFER_ORDER: {
+        if (max != 0)
+            return ERR_INVALID_ARGS;
+        size_t order;
+        if (cmdlen != sizeof(order))
+            return ERR_INVALID_ARGS;
+        memcpy(&order, cmd, sizeof(order));
+        return x86_pt_set_buffer_order(ipt_dev, order);
+    }
+    case IOCTL_IPT_SET_NUM_BUFFERS: {
+        if (max != 0)
+            return ERR_INVALID_ARGS;
+        size_t num;
+        if (cmdlen != sizeof(num))
+            return ERR_INVALID_ARGS;
+        memcpy(&num, cmd, sizeof(num));
+        return x86_pt_set_num_buffers(ipt_dev, num);
+    }
     default:
         return ERR_INVALID_ARGS;
     }
