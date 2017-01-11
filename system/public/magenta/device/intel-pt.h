@@ -45,6 +45,16 @@ IOCTL_WRAPPER(ioctl_ipt_free, IOCTL_IPT_FREE);
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 5)
 IOCTL_WRAPPER_VARIN(ioctl_ipt_write_file, IOCTL_IPT_WRITE_FILE, char);
 
+// set size of each buffer, in pages, as a power of 2,
+#define IOCTL_IPT_SET_BUFFER_ORDER \
+    IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 10)
+IOCTL_WRAPPER_IN(ioctl_ipt_set_buffer_order, IOCTL_IPT_SET_BUFFER_ORDER, size_t);
+
+// set number of buffers
+#define IOCTL_IPT_SET_NUM_BUFFERS \
+    IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 11)
+IOCTL_WRAPPER_IN(ioctl_ipt_set_num_buffers, IOCTL_IPT_SET_NUM_BUFFERS, size_t);
+
 ///////////////////////////////////////////////////////////////////////////////
 
 // The remainder of this file is for use by the driver, not any client.
