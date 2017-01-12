@@ -873,7 +873,7 @@ static void read_buildid(struct dso* p, char* buf, size_t buf_size) {
 // Subroutine of trace_load to simplify it.
 
 static void trace_load(struct dso* p) {
-    if (!trace_file_name)
+    if (0 && !trace_file_name)
         return;
 
     static mx_koid_t pid = MX_KOID_INVALID;
@@ -896,7 +896,8 @@ static void trace_load(struct dso* p) {
     char buildid[MAX_BUILDID_SIZE * 2 + 1];
     read_buildid(p, buildid, sizeof(buildid));
 
-    const char* name = p->name[0] == '\0' ? "<application>" : p->name;
+    // TODO(dje): Where does ^G in app name come from?
+    const char* name = p->soname == NULL ? "<application>" : p->name;
     const char* soname = p->soname == NULL ? "<application>" : p->soname;
 
 #if 0 // wip, need filesystem, looking for alternatives
@@ -927,10 +928,16 @@ static void trace_load(struct dso* p) {
         trace_file = NULL;
     }
 #else
+    // Cope with damn line wrapping.
+    static int seqno;
     (void) trace_file;
-    debugmsg("trace_load: %" PRIu64 ": %p %p %p %s %s %s",
-             pid, p->base, p->map, p->map + p->map_len,
-             buildid, soname, name);
+    debugmsg("trace_load: %" PRIu64 ":%da %p %p %p",
+             pid, seqno, p->base, p->map, p->map + p->map_len);
+    debugmsg("trace_load: %" PRIu64 ":%db %s",
+             pid, seqno, buildid);
+    debugmsg("trace_load: %" PRIu64 ":%dc %s %s",
+             pid, seqno, soname, name);
+    ++seqno;
 #endif
 }
 
@@ -1548,7 +1555,7 @@ static void* dls3(mx_handle_t thread_self, mx_handle_t exec_vmo, int argc, char*
         }
     }
 
-    if (trace_file_name) {
+    if (1 || trace_file_name) {
         for (struct dso* p = &app; p != NULL; p = p->next) {
             trace_load(p);
         }
@@ -1749,7 +1756,7 @@ static void* dlopen_internal(mx_handle_t vmo, const char* file, int mode) {
 
     update_tls_size();
     _dl_debug_state();
-    if (trace_file_name) {
+    if (1 || trace_file_name) {
         trace_load(p);
     }
     orig_tail = tail;

@@ -41,46 +41,6 @@
     } while (0)
 #endif
 
-typedef struct ipt_per_cpu_state {
-    // msrs
-    uint64_t ctl;
-    uint64_t status;
-    uint64_t output_base;
-    uint64_t output_mask_ptrs;
-    uint64_t cr3_match;
-
-    // trace buffers and ToPA tables
-    // ToPA: Table of Physical Addresses
-    io_buffer_t* buffers;
-    io_buffer_t* topas;
-} ipt_per_cpu_state_t;
-
-typedef struct ipt_device {
-    mx_device_t device;
-
-    // Number of entries in |per_cpu_state|.
-    uint32_t num_cpus;
-
-    ipt_per_cpu_state_t* per_cpu_state;
-
-    // Only one open of this device is supported at a time.
-    bool opened;
-
-    bool active;
-
-    // number of buffers, each 2^|buffer_order| pages in size
-    size_t num_buffers;
-
-    // log2 size of each buffer, in pages
-    uint8_t buffer_order;
-
-    // number of ToPA tables needed
-    size_t num_tables;
-
-} ipt_device_t;
-
-#define get_ipt_device(dev) containerof(dev, ipt_device_t, device)
-
 // Macros for building entries for the Table of Physical Addresses
 #define TOPA_ENTRY_PHYS_ADDR(x) ((uint64_t)(x) & ~((1ULL<<12)-1))
 #define TOPA_ENTRY_SIZE(size_log2) ((uint64_t)((size_log2) - 12) << 6)
@@ -115,6 +75,8 @@ typedef struct ipt_device {
 #define RTIT_STATUS_ERROR (1ULL<<4)
 #define RTIT_STATUS_STOPPED (1ULL<<5)
 
+#define MAX_NUM_ADDR_RANGES 4
+
 // Valid ToPA entry sizes
 #define TOPA_MIN_SHIFT 12
 #define TOPA_MAX_SHIFT 27
@@ -125,16 +87,65 @@ typedef struct ipt_device {
 // minimum can provide a capture buffer of just under 8MB.
 #define TOPA_MAX_TABLE_ENTRIES 2048 // Use up to 16-KB tables (2048 8-byte entries)
 
+typedef struct ipt_per_cpu_state {
+    // msrs
+    uint64_t ctl;
+    uint64_t status;
+    uint64_t output_base;
+    uint64_t output_mask_ptrs;
+
+    // trace buffers and ToPA tables
+    // ToPA: Table of Physical Addresses
+    io_buffer_t* buffers;
+    io_buffer_t* topas;
+} ipt_per_cpu_state_t;
+
+typedef struct ipt_device {
+    mx_device_t device;
+
+    // Number of entries in |per_cpu_state|.
+    uint32_t num_cpus;
+
+    ipt_per_cpu_state_t* per_cpu_state;
+
+    // Only one open of this device is supported at a time.
+    bool opened;
+
+    bool active;
+
+    // number of buffers, each 2^|buffer_order| pages in size
+    size_t num_buffers;
+
+    // log2 size of each buffer, in pages
+    uint8_t buffer_order;
+
+    // number of ToPA tables needed
+    size_t num_tables;
+
+    // user configurable settings
+    uint64_t ctl_config;
+
+    // the cr3 filter value, only used if enabled
+    uint64_t cr3_filter;
+
+    // address range registers
+    struct {
+        uint64_t a,b;
+    } addr_ranges[MAX_NUM_ADDR_RANGES];
+} ipt_device_t;
+
+#define get_ipt_device(dev) containerof(dev, ipt_device_t, device)
+
 static uint32_t ipt_config_family;
 static uint32_t ipt_config_model;
 static uint32_t ipt_config_stepping;
 
-static int ipt_config_addr_cfg_max;
-static int ipt_config_mtc_freq_mask;
-static int ipt_config_cyc_thresh_mask;
-static int ipt_config_psb_freq_mask;
-static int ipt_config_addr_range_num;
-static int ipt_config_bus_freq;
+static uint32_t ipt_config_addr_cfg_max = 0;
+static uint32_t ipt_config_mtc_freq_mask = 0;
+static uint32_t ipt_config_cyc_thresh_mask = 0;
+static uint32_t ipt_config_psb_freq_mask = 0;
+static uint32_t ipt_config_addr_range_num = 0;
+static uint32_t ipt_config_bus_freq = 0;
 
 static bool ipt_config_cr3_filtering = false;
 static bool ipt_config_psb = false;
@@ -369,10 +380,6 @@ static mx_status_t x86_pt_alloc1(ipt_device_t* ipt_dev) {
     mx_status_t status;
     uint32_t num_cpus = mx_num_cpus();
     size_t buffer_pages = 1 << ipt_dev->buffer_order;
-    size_t nr_pages = ipt_dev->num_buffers * buffer_pages;
-    uint64_t total_per_cpu = nr_pages * PAGE_SIZE;
-    if (total_per_cpu > MAX_PER_CPU_SPACE)
-        return ERR_INVALID_ARGS;
 
     for (uint32_t cpu = 0; cpu < num_cpus; ++cpu) {
         ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
@@ -601,17 +608,59 @@ static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
     return NO_ERROR;
 }
 
-static mx_status_t x86_pt_set_buffer_order(ipt_device_t* ipt_dev, size_t order) {
+static mx_status_t x86_pt_set_buffer_size(ipt_device_t* ipt_dev, size_t order, size_t num) {
     if (order > MAX_BUFFER_ORDER)
         return ERR_INVALID_ARGS;
+    if (num == 0 || num > MAX_NUM_BUFFERS)
+        return ERR_INVALID_ARGS;
+    size_t buffer_pages = 1 << order;
+    size_t nr_pages = num * buffer_pages;
+    size_t total_per_cpu = nr_pages * PAGE_SIZE;
+    if (total_per_cpu > MAX_PER_CPU_SPACE)
+        return ERR_INVALID_ARGS;
     ipt_dev->buffer_order = order;
+    ipt_dev->num_buffers = num;
     return NO_ERROR;
 }
 
-static mx_status_t x86_pt_set_num_buffers(ipt_device_t* ipt_dev, size_t num) {
-    if (num == 0 || num > MAX_NUM_BUFFERS)
+static mx_status_t x86_pt_set_ctl_config(ipt_device_t* ipt_dev, uint64_t ctl_config) {
+    const uint64_t settable_mask = (
+        IPT_CTL_CYC_EN |
+        IPT_CTL_OS_ALLOWED |
+        IPT_CTL_USER_ALLOWED |
+        IPT_CTL_POWER_EVENT_EN |
+        IPT_CTL_FUP_ON_PTW |
+        IPT_CTL_CR3_FILTER |
+        IPT_CTL_MTC_EN |
+        IPT_CTL_TSC_EN |
+        IPT_CTL_DIS_RETC |
+        IPT_CTL_PTW_EN |
+        IPT_CTL_BRANCH_EN |
+        IPT_CTL_MTC_FREQ |
+        IPT_CTL_CYC_THRESH |
+        IPT_CTL_PSB_FREQ |
+        IPT_CTL_ADDR0 |
+        IPT_CTL_ADDR1 |
+        IPT_CTL_ADDR2 |
+        IPT_CTL_ADDR3
+        );
+    if ((ctl_config & ~settable_mask) != 0)
         return ERR_INVALID_ARGS;
-    ipt_dev->num_buffers = num;
+    ipt_dev->ctl_config = ctl_config;
+    // TODO(dje): Check for unsupported bits being set.
+    return NO_ERROR;
+}
+
+static mx_status_t x86_pt_set_cr3_filter(ipt_device_t* ipt_dev, uint64_t cr3_filter) {
+    ipt_dev->cr3_filter = cr3_filter;
+    return NO_ERROR;
+}
+
+static mx_status_t x86_pt_set_addr_config(ipt_device_t* ipt_dev, size_t range, size_t a, size_t b) {
+    if (range > ipt_config_addr_range_num)
+        return ERR_INVALID_ARGS;
+    ipt_dev->addr_ranges[range].a = a;
+    ipt_dev->addr_ranges[range].b = b;
     return NO_ERROR;
 }
 
@@ -750,23 +799,41 @@ static ssize_t ipt_ioctl(mx_device_t* dev, uint32_t op,
         return x86_pt_free(ipt_dev);
     case IOCTL_IPT_WRITE_FILE:
         return ipt_write_file(ipt_dev, cmd, cmdlen, reply, max);
-    case IOCTL_IPT_SET_BUFFER_ORDER: {
+    case IOCTL_IPT_SET_BUFFER_SIZE: {
         if (max != 0)
             return ERR_INVALID_ARGS;
-        size_t order;
-        if (cmdlen != sizeof(order))
+        size_t size[2];
+        if (cmdlen != sizeof(size))
             return ERR_INVALID_ARGS;
-        memcpy(&order, cmd, sizeof(order));
-        return x86_pt_set_buffer_order(ipt_dev, order);
+        memcpy(size, cmd, sizeof(size));
+        return x86_pt_set_buffer_size(ipt_dev, size[0], size[1]);
     }
-    case IOCTL_IPT_SET_NUM_BUFFERS: {
+    case IOCTL_IPT_SET_CTL_CONFIG: {
         if (max != 0)
             return ERR_INVALID_ARGS;
-        size_t num;
-        if (cmdlen != sizeof(num))
+        uint64_t ctl_config;
+        if (cmdlen != sizeof(ctl_config))
             return ERR_INVALID_ARGS;
-        memcpy(&num, cmd, sizeof(num));
-        return x86_pt_set_num_buffers(ipt_dev, num);
+        memcpy(&ctl_config, cmd, sizeof(ctl_config));
+        return x86_pt_set_ctl_config(ipt_dev, ctl_config);
+    }
+    case IOCTL_IPT_SET_CR3_FILTER: {
+        if (max != 0)
+            return ERR_INVALID_ARGS;
+        uint64_t cr3_filter;
+        if (cmdlen != sizeof(cr3_filter))
+            return ERR_INVALID_ARGS;
+        memcpy(&cr3_filter, cmd, sizeof(cr3_filter));
+        return x86_pt_set_cr3_filter(ipt_dev, cr3_filter);
+    }
+    case IOCTL_IPT_SET_ADDR_CONFIG: {
+        if (max != 0)
+            return ERR_INVALID_ARGS;
+        uint64_t addr[3];
+        if (cmdlen != sizeof(addr))
+            return ERR_INVALID_ARGS;
+        memcpy(addr, cmd, sizeof(addr));
+        return x86_pt_set_addr_config(ipt_dev, addr[0], addr[1], addr[2]);
     }
     default:
         return ERR_INVALID_ARGS;
