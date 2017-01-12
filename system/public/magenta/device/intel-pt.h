@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 // TODO(dje): wip wip wip
+// What's here now is a simple version to get things going.
 
 #pragma once
 
@@ -45,15 +46,53 @@ IOCTL_WRAPPER(ioctl_ipt_free, IOCTL_IPT_FREE);
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 5)
 IOCTL_WRAPPER_VARIN(ioctl_ipt_write_file, IOCTL_IPT_WRITE_FILE, char);
 
-// set size of each buffer, in pages, as a power of 2,
-#define IOCTL_IPT_SET_BUFFER_ORDER \
+// set the buffer size
+// The input is an array of two values:
+// [0] buffer "order" (#pages as power of 2)
+// [1] number of such buffers
+#define IOCTL_IPT_SET_BUFFER_SIZE \
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 10)
-IOCTL_WRAPPER_IN(ioctl_ipt_set_buffer_order, IOCTL_IPT_SET_BUFFER_ORDER, size_t);
+IOCTL_WRAPPER_VARIN(ioctl_ipt_set_buffer_size, IOCTL_IPT_SET_BUFFER_SIZE, size_t);
 
-// set number of buffers
-#define IOCTL_IPT_SET_NUM_BUFFERS \
+// set the configurable bits of the control msr
+#define IOCTL_IPT_SET_CTL_CONFIG \
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 11)
-IOCTL_WRAPPER_IN(ioctl_ipt_set_num_buffers, IOCTL_IPT_SET_NUM_BUFFERS, size_t);
+IOCTL_WRAPPER_IN(ioctl_ipt_set_ctl_config, IOCTL_IPT_SET_CTL_CONFIG, uint64_t);
+
+// These bits are writable by the user with ioctl_ipt_set_ctl_config.
+// The driver will override a setting if it's unsafe (e.g., causes #gpf).
+#define IPT_CTL_CYC_EN (1ULL << 1)
+#define IPT_CTL_OS_ALLOWED (1ULL << 2)
+#define IPT_CTL_USER_ALLOWED (1ULL << 3)
+#define IPT_CTL_POWER_EVENT_EN (1ULL << 4)
+#define IPT_CTL_FUP_ON_PTW (1ULL << 5)
+#define IPT_CTL_CR3_FILTER (1ULL << 7)
+#define IPT_CTL_MTC_EN (1ULL << 9)
+#define IPT_CTL_TSC_EN (1ULL << 10)
+#define IPT_CTL_DIS_RETC (1ULL << 11)
+#define IPT_CTL_PTW_EN (1ULL << 12)
+#define IPT_CTL_BRANCH_EN (1ULL << 13)
+#define IPT_CTL_MTC_FREQ (0xfULL << 14)
+#define IPT_CTL_CYC_THRESH (0xfULL << 19)
+#define IPT_CTL_PSB_FREQ (0xfULL << 24)
+#define IPT_CTL_ADDR0 (0xfULL << 32)
+#define IPT_CTL_ADDR1 (0xfULL << 36)
+#define IPT_CTL_ADDR2 (0xfULL << 40)
+#define IPT_CTL_ADDR3 (0xfULL << 44)
+
+// set the cr3 filter msr
+#define IOCTL_IPT_SET_CR3_FILTER \
+    IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 12)
+IOCTL_WRAPPER_IN(ioctl_ipt_set_cr3_filter, IOCTL_IPT_SET_CR3_FILTER, uint64_t);
+
+// set address range msrs
+// The input is an array of three values:
+// [0] address range register number, 0-3
+// [1] "A" value
+// [2] "B" value
+#define IOCTL_IPT_SET_ADDR_CONFIG \
+    IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 13)
+IOCTL_WRAPPER_VARIN(ioctl_ipt_set_addr_config, IOCTL_IPT_SET_ADDR_CONFIG, uint64_t);
 
 ///////////////////////////////////////////////////////////////////////////////
 
