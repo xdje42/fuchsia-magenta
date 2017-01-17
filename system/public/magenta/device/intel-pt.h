@@ -47,14 +47,15 @@ IOCTL_WRAPPER(ioctl_ipt_free, IOCTL_IPT_FREE);
 IOCTL_WRAPPER_VARIN(ioctl_ipt_write_file, IOCTL_IPT_WRITE_FILE, char);
 
 // set the buffer size
-// The input is an array of two values:
-// [0] buffer "order" (#pages as power of 2)
-// [1] number of such buffers
+// The input is an array of three values:
+// [0] number of buffers
+// [1] size of buffer, its "order" (#pages as power of 2)
+// [2] flag, non-zero -> circular buffer
 #define IOCTL_IPT_SET_BUFFER_SIZE \
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 10)
 IOCTL_WRAPPER_VARIN(ioctl_ipt_set_buffer_size, IOCTL_IPT_SET_BUFFER_SIZE, size_t);
 
-// set the configurable bits of the control msr
+// set the user-configurable bits of the control msr (IA32_RTIT_CTL)
 #define IOCTL_IPT_SET_CTL_CONFIG \
     IOCTL(IOCTL_KIND_DEFAULT, IOCTL_FAMILY_IPT, 11)
 IOCTL_WRAPPER_IN(ioctl_ipt_set_ctl_config, IOCTL_IPT_SET_CTL_CONFIG, uint64_t);

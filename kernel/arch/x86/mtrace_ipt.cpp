@@ -354,6 +354,7 @@ status_t mtrace_ipt_control(uint32_t action, uint32_t options,
         uint64_t value;
         if (arch_copy_from_user(&value, arg, size) != NO_ERROR)
             return ERR_INVALID_ARGS;
+        TRACEF("action %u, value 0x%" PRIx64 "\n", action, value);
         return mtrace_ipt_stage_msr(action, options, value);
     }
 
@@ -372,6 +373,7 @@ status_t mtrace_ipt_control(uint32_t action, uint32_t options,
         auto status = mtrace_ipt_get_msr(action, options, &value);
         if (status != NO_ERROR)
             return status;
+        TRACEF("action %u, value 0x%" PRIx64 "\n", action, value);
         if (arch_copy_to_user(arg, &value, size) != NO_ERROR)
             return ERR_INVALID_ARGS;
         return NO_ERROR;

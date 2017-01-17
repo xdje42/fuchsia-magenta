@@ -119,6 +119,10 @@ typedef struct ipt_device {
     // log2 size of each buffer, in pages
     uint8_t buffer_order;
 
+    // if true then the buffer is circular, otherwise tracing stops when the
+    // buffer fills
+    bool is_circular;
+
     // number of ToPA tables needed
     size_t num_tables;
 
@@ -164,7 +168,7 @@ static bool ipt_config_lip = false;
 // MAX_NUM_BUFFERS * (1 << (MAX_BUFFER_ORDER + PAGE_SIZE_SHIFT)).
 // Buffers have to be contiguous pages, but we can have a lot of them.
 // Supporting large buffers and/or lots of them is for experimentation.
-#define MAX_PER_CPU_SPACE (64 * 1024 * 1024)
+#define MAX_PER_CPU_SPACE (256 * 1024 * 1024)
 
 // default number of buffers, each 2^|buffer_order| pages in size
 #define DEFAULT_NUM_BUFFERS 16
@@ -291,6 +295,8 @@ static void make_topa(ipt_device_t* ipt_dev, uint32_t cpu) {
            curr_table == ipt_dev->num_tables);
 
     // Populate END entries for completed tables
+    // Assume the table is circular. We'll set the stop bit on the last
+    // entry later.
     for (size_t i = 0; i < curr_table; ++i) {
         io_buffer_t* this_table = &per_cpu->topas[i];
         io_buffer_t* next_table;
@@ -318,7 +324,8 @@ static void make_topa(ipt_device_t* ipt_dev, uint32_t cpu) {
 
     // Add the STOP flag to the last non-END entry in the tables
     assert(last_entry);
-    *last_entry |= TOPA_ENTRY_STOP;
+    if (!ipt_dev->is_circular)
+        *last_entry |= TOPA_ENTRY_STOP;
 }
 
 // Compute the number of ToPA entries needed for the configured number of
@@ -476,13 +483,8 @@ static mx_status_t x86_pt_start(ipt_device_t* ipt_dev) {
         ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
 
         // Stage the ctl value for enabling the trace
-        uint64_t ctl = RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
-        // TODO(teisenbe): Allow caller provided flags for controlling
-        // these options.
-        ctl |= RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED;
-        ctl |= RTIT_CTL_BRANCH_EN;
-        ctl |= RTIT_CTL_TSC_EN;
-        //ctl |= RTIT_CTL_PTW_EN; -- causes gpf
+        uint64_t ctl = ipt_dev->ctl_config;
+        ctl |= RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
         status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_CTL,
                                    cpu, &ctl, sizeof(ctl));
         if (status != NO_ERROR)
@@ -608,10 +610,10 @@ static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
     return NO_ERROR;
 }
 
-static mx_status_t x86_pt_set_buffer_size(ipt_device_t* ipt_dev, size_t order, size_t num) {
-    if (order > MAX_BUFFER_ORDER)
-        return ERR_INVALID_ARGS;
+static mx_status_t x86_pt_set_buffer_size(ipt_device_t* ipt_dev, size_t num, size_t order, bool is_circular) {
     if (num == 0 || num > MAX_NUM_BUFFERS)
+        return ERR_INVALID_ARGS;
+    if (order > MAX_BUFFER_ORDER)
         return ERR_INVALID_ARGS;
     size_t buffer_pages = 1 << order;
     size_t nr_pages = num * buffer_pages;
@@ -620,6 +622,7 @@ static mx_status_t x86_pt_set_buffer_size(ipt_device_t* ipt_dev, size_t order, s
         return ERR_INVALID_ARGS;
     ipt_dev->buffer_order = order;
     ipt_dev->num_buffers = num;
+    ipt_dev->is_circular = is_circular;
     return NO_ERROR;
 }
 
@@ -691,6 +694,13 @@ static mx_status_t ipt_open(mx_device_t* dev, mx_device_t** dev_out, uint32_t fl
         // reset values that have defaults
         ipt_dev->num_buffers = DEFAULT_NUM_BUFFERS;
         ipt_dev->buffer_order = DEFAULT_BUFFER_ORDER;
+        ipt_dev->is_circular = false;
+        ipt_dev->ctl_config = (
+            RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED |
+            RTIT_CTL_BRANCH_EN |
+            RTIT_CTL_TSC_EN
+            //RTIT_CTL_PTW_EN -- causes gpf
+            );
     }
 
     ipt_dev->opened = true;
@@ -802,11 +812,11 @@ static ssize_t ipt_ioctl(mx_device_t* dev, uint32_t op,
     case IOCTL_IPT_SET_BUFFER_SIZE: {
         if (max != 0)
             return ERR_INVALID_ARGS;
-        size_t size[2];
+        size_t size[3];
         if (cmdlen != sizeof(size))
             return ERR_INVALID_ARGS;
         memcpy(size, cmd, sizeof(size));
-        return x86_pt_set_buffer_size(ipt_dev, size[0], size[1]);
+        return x86_pt_set_buffer_size(ipt_dev, size[0], size[1], size[2] != 0);
     }
     case IOCTL_IPT_SET_CTL_CONFIG: {
         if (max != 0)
