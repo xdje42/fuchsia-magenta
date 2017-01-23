@@ -22,6 +22,7 @@ __BEGIN_CDECLS
 // Bits in the IA32_RTIT_CTL MSR.
 // These bits are writable by the user with ioctl_ipt_set_ctl_config.
 // The driver will override a setting if it's unsafe (e.g., causes #gpf).
+// TODO(dje): Append _MASK, add _BIT, _LEN.
 #define IPT_CTL_CYC_EN (1ULL << 1)
 #define IPT_CTL_OS_ALLOWED (1ULL << 2)
 #define IPT_CTL_USER_ALLOWED (1ULL << 3)
