@@ -741,6 +741,24 @@ extern mx_status_t _mx_mtrace_control(
     void* ptr,
     uint32_t size);
 
+extern mx_status_t mx_mtrace_control_thread(
+    mx_handle_t handle,
+    mx_handle_t thread_handle,
+    uint32_t kind,
+    uint32_t action,
+    uint32_t options,
+    void* ptr,
+    uint32_t size);
+
+extern mx_status_t _mx_mtrace_control_thread(
+    mx_handle_t handle,
+    mx_handle_t thread_handle,
+    uint32_t kind,
+    uint32_t action,
+    uint32_t options,
+    void* ptr,
+    uint32_t size);
+
 extern mx_handle_t mx_debug_transfer_handle(
     mx_handle_t proc,
     mx_handle_t handle);

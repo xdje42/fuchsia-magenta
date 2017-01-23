@@ -8,11 +8,13 @@
 
 #include <err.h>
 #include <magenta/compiler.h>
+#include <magenta/thread_dispatcher.h>
+#include <mxtl/ref_ptr.h>
 #include <stdint.h>
-
-__BEGIN_CDECLS
 
 status_t mtrace_control(uint32_t kind, uint32_t action, uint32_t options,
                         void* arg, uint32_t size);
 
-__END_CDECLS
+status_t mtrace_control_thread(mxtl::RefPtr<ThreadDispatcher> thread,
+                               uint32_t kind, uint32_t action, uint32_t options,
+                               void* arg, uint32_t size);

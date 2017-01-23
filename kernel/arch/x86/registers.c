@@ -24,7 +24,9 @@
 #include <arch/x86/mp.h>
 #include <arch/x86/feature.h>
 #include <arch/x86/registers.h>
+#include <arch/x86/mtrace_ipt.h>
 #include <magenta/compiler.h>
+#include <magenta/device/intel-pt.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread.h>
 #include <string.h>
@@ -32,12 +34,13 @@
 
 #define LOCAL_TRACE 0
 
-#define IA32_XSS_MSR 0xDA0
 /* offset in xsave area that components >= 2 start at */
 #define XSAVE_EXTENDED_AREA_OFFSET 576
 /* bits 2 through 62 of state vector can optionally be set */
 #define XSAVE_MAX_EXT_COMPONENTS 61
 #define XSAVE_XCOMP_BV_COMPACT (1ULL<<63)
+#define XSAVE_STATE_PT_BIT 8
+#define XSAVE_STATE_MAX_BIT 62
 
 static void fxsave(void *register_state);
 static void fxrstor(void *register_state);
@@ -531,4 +534,142 @@ static void xsetbv(uint32_t reg, uint64_t val)
                      :
                      : "c"(reg), "d"((uint32_t)(val >> 32)), "a"((uint32_t)val)
                      : "memory");
+}
+
+/* Layout of PT state in the extended save area.
+ * While it may be true that the layout matches the external struct for
+ * providing these values (mx_x86_pt_regs_t), we don't assume that. */
+
+typedef struct {
+    uint64_t ctl;
+    uint64_t status;
+    uint64_t output_base;
+    uint64_t output_mask_ptrs;
+    uint64_t cr3_match;
+    uint64_t addr0_a, addr0_b;
+    uint64_t addr1_a, addr1_b;
+} x86_xsave_pt_regs_t;
+
+/* Return the offset of extended component |c| given |bitmap|. */
+
+static size_t get_component_offset(size_t c, uint64_t bitmap) {
+    size_t offset = 0;
+    for (uint i = 2; i < c; ++i) {
+        if (!(bitmap & (1ULL << i)))
+            continue;
+        if (state_components[i].align64)
+            offset = ROUNDUP(offset, 64);
+        offset += state_components[i].size;
+    }
+    if (state_components[c].align64)
+        offset = ROUNDUP(offset, 64);
+    return offset;
+}
+
+/* Given a pointer to the extended save area, return a pointer to the PT regs
+ * in it. If necessary, this will make room. */
+
+static x86_xsave_pt_regs_t *x86_get_pt_regs_buffer(void *reg_state) {
+    /* The extended area header is at offset 512.
+       Intel Vol. 1 chapter 13.4.2 */
+    uint64_t *header = (uint64_t*) ((char*)reg_state + 512);
+    uint64_t xcomp_bv = header[1];
+    /* the header is 64 bytes */
+    char *base = (char*)header + 64;
+    DEBUG_ASSERT(xcomp_bv & XSAVE_XCOMP_BV_COMPACT);
+
+    /* Find the offset where PT regs live. */
+    size_t pt_offset = 0;  
+    for (uint i = 2; i < XSAVE_STATE_PT_BIT; ++i) {
+        if (!(xcomp_bv & (1ULL << i)))
+            continue;
+        if (state_components[i].align64)
+            pt_offset = ROUNDUP(pt_offset, 64);
+        pt_offset += state_components[i].size;
+    }
+    if (state_components[XSAVE_STATE_PT_BIT].align64)
+        pt_offset = ROUNDUP(pt_offset, 64);
+
+    /* Insert room if needed. The shift needs to take into account any
+       potential changes in alignment adjustments. Thus we can't just do a
+       memmove. Fortunately this isn't on any hot path, so there's no need
+       for extreme efficiency here. In practice there is currently nothing to
+       do anyway, so this terminates quickly. */
+    uint64_t new_xcomp_bv = xcomp_bv | X86_XSAVE_STATE_PT;
+    if (!(xcomp_bv & X86_XSAVE_STATE_PT)) {
+        uint64_t remaining = xcomp_bv & ~(XSAVE_XCOMP_BV_COMPACT | ((X86_XSAVE_STATE_PT << 1) - 1));
+        if (remaining != 0) {
+            for (uint i = XSAVE_STATE_MAX_BIT; i > XSAVE_STATE_PT_BIT; --i) {
+                if (xcomp_bv & (1ULL << i)) {
+                    size_t old_offset = get_component_offset(i, xcomp_bv);
+                    size_t new_offset = get_component_offset(i, new_xcomp_bv);
+                    size_t size = state_components[i].size;
+                    memmove(base + new_offset, base + old_offset, size);
+                }
+            }
+        }
+        memset(base + pt_offset, 0, state_components[XSAVE_STATE_PT_BIT].size);
+        header[1] = new_xcomp_bv;
+    }
+
+    return (x86_xsave_pt_regs_t*) (base + pt_offset);
+}
+
+status_t x86_get_pt_regs(thread_t *thread, void *regs, uint32_t *buf_size) {
+#if ARCH_X86_64
+    mx_x86_pt_regs_t *r = regs;
+
+    uint32_t provided_buf_size = *buf_size;
+    *buf_size = sizeof(*r);
+
+    if (provided_buf_size < sizeof(*r))
+        return ERR_BUFFER_TOO_SMALL;
+
+    if ((thread->flags & THREAD_FLAG_STOPPED_FOR_EXCEPTION) == 0)
+        return ERR_BAD_STATE;
+
+    const x86_xsave_pt_regs_t *pt = x86_get_pt_regs_buffer(thread->arch.extended_register_state);
+
+    r->ctl = pt->ctl;
+    r->status = pt->status;
+    r->output_base = pt->output_base;
+    r->output_mask_ptrs = pt->output_mask_ptrs;
+    r->cr3_match = pt->cr3_match;
+    r->addr_ranges[0].a = pt->addr0_a;
+    r->addr_ranges[0].b = pt->addr0_b;
+    r->addr_ranges[1].a = pt->addr1_a;
+    r->addr_ranges[1].b = pt->addr1_b;
+
+    return NO_ERROR;
+#else
+    return ERR_NOT_SUPPORTED;
+#endif
+}
+
+status_t x86_set_pt_regs(thread_t *thread, const void *regs, uint32_t buf_size) {
+#if ARCH_X86_64
+    const mx_x86_pt_regs_t *r = regs;
+
+    if (buf_size != sizeof(*r))
+        return ERR_INVALID_ARGS;
+
+    if ((thread->flags & THREAD_FLAG_STOPPED_FOR_EXCEPTION) == 0)
+        return ERR_BAD_STATE;
+
+    x86_xsave_pt_regs_t *pt = x86_get_pt_regs_buffer(thread->arch.extended_register_state);
+
+    pt->ctl = r->ctl;
+    pt->status = r->status;
+    pt->output_base = r->output_base;
+    pt->output_mask_ptrs = r->output_mask_ptrs;
+    pt->cr3_match = r->cr3_match;
+    pt->addr0_a = r->addr_ranges[0].a;
+    pt->addr0_b = r->addr_ranges[0].b;
+    pt->addr1_a = r->addr_ranges[1].a;
+    pt->addr1_b = r->addr_ranges[1].b;
+
+    return NO_ERROR;
+#else
+    return ERR_NOT_SUPPORTED;
+#endif
 }

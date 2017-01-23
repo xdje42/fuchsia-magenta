@@ -281,8 +281,8 @@ mx_status_t sys_ktrace_write(mx_handle_t handle, uint32_t event_id, uint32_t arg
     return NO_ERROR;
 }
 
-mx_status_t sys_mtrace_control(mx_handle_t handle, uint32_t kind,
-                               uint32_t action, uint32_t options,
+mx_status_t sys_mtrace_control(mx_handle_t handle,
+                               uint32_t kind, uint32_t action, uint32_t options,
                                void* _ptr, uint32_t size) {
     // TODO: finer grained validation
     mx_status_t status;
@@ -291,6 +291,29 @@ mx_status_t sys_mtrace_control(mx_handle_t handle, uint32_t kind,
     }
 
     return mtrace_control(kind, action, options, _ptr, size);
+}
+
+// TODO(dje): This is basically here to avoid using a regset for the PT regs,
+// but otherwise there is no difference between this and normal r/w of thread
+// regs.
+
+mx_status_t sys_mtrace_control_thread(mx_handle_t handle, mx_handle_t thread_handle,
+                                      uint32_t kind, uint32_t action, uint32_t options,
+                                      void* _ptr, uint32_t size) {
+    // TODO: finer grained validation
+    mx_status_t status;
+    if ((status = validate_resource_handle(handle)) < 0) {
+        return status;
+    }
+
+    auto up = ProcessDispatcher::GetCurrent();
+
+    mxtl::RefPtr<ThreadDispatcher> thread;
+    status = up->GetDispatcher(thread_handle, &thread, MX_RIGHT_WRITE);
+    if (status != NO_ERROR)
+        return status;
+
+    return mtrace_control_thread(thread, kind, action, options, _ptr, size);
 }
 
 mx_status_t sys_thread_read_state(mx_handle_t handle, uint32_t state_kind,

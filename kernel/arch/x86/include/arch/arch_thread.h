@@ -21,12 +21,15 @@ struct arch_thread {
     vaddr_t gs_base;
 #endif
 
-    /* buffer to save fpu state */
+    /* buffer to save fpu (and extended register) state */
     vaddr_t *extended_register_state;
     uint8_t extended_register_buffer[X86_MAX_EXTENDED_REGISTER_SIZE + 64];
 
     /* if non-NULL, address to return to on page fault */
     void *page_fault_resume;
+
+    /* if non-NULL, Intel PT data on this thread */
+    struct thread_ipt_data *ipt_data;
 };
 
 __END_CDECLS

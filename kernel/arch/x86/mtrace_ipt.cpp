@@ -48,29 +48,6 @@
 #define IA32_RTIT_ADDR3_A 0x586
 #define IA32_RTIT_ADDR3_B 0x587
 
-// Macros for building IA32_RTIT_CTL values
-#define RTIT_CTL_TRACE_EN (1ULL<<0)
-#define RTIT_CTL_CYC_EN (1ULL<<1)
-#define RTIT_CTL_OS_ALLOWED (1ULL<<2)
-#define RTIT_CTL_USER_ALLOWED (1ULL<<3)
-#define RTIT_CTL_POWER_EVENT_EN (1ULL<<4)
-#define RTIT_CTL_FUP_ON_PTW (1ULL<<5)
-#define RTIT_CTL_FABRIC_EN (1ULL<<6)
-#define RTIT_CTL_CR3_FILTER (1ULL<<7)
-#define RTIT_CTL_TOPA (1ULL<<8)
-#define RTIT_CTL_MTC_EN (1ULL<<9)
-#define RTIT_CTL_TSC_EN (1ULL<<10)
-#define RTIT_CTL_DIS_RETC (1ULL<<11)
-#define RTIT_CTL_PTW_EN (1ULL<<12)
-#define RTIT_CTL_BRANCH_EN (1ULL<<13)
-
-// Masks for reading IA32_RTIT_STATUS
-#define RTIT_STATUS_FILTER_EN (1ULL<<0)
-#define RTIT_STATUS_CONTEXT_EN (1ULL<<1)
-#define RTIT_STATUS_TRIGGER_EN (1ULL<<2)
-#define RTIT_STATUS_ERROR (1ULL<<4)
-#define RTIT_STATUS_STOPPED (1ULL<<5)
-
 // Our own copy of what h/w supports, mostly for sanity checking.
 static bool supports_cr3_filtering = false;
 static bool supports_psb = false;
@@ -83,17 +60,30 @@ static bool supports_output_topa_multi = false;
 static bool supports_output_single = false;
 static bool supports_output_transport = false;
 
-struct ipt_state_t {
+// cr3 filtering staging area
+static uint64_t cr3_match;
+
+struct ipt_cpu_state_t {
     uint64_t ctl;
     uint64_t status;
     uint64_t output_base;
     uint64_t output_mask_ptrs;
     uint64_t cr3_match;
+    struct {
+        uint64_t a,b;
+    } addr_ranges[IPT_MAX_NUM_ADDR_RANGES];
 };
 
-static ipt_state_t* ipt_state;
+static ipt_cpu_state_t* ipt_cpu_state;
 
 static bool active = false;
+
+typedef enum {
+    IPT_TRACE_CPUS,
+    IPT_TRACE_THREADS
+} ipt_trace_mode_t;
+
+static ipt_trace_mode_t trace_mode = IPT_TRACE_CPUS;
 
 void x86_processor_trace_init(void)
 {
@@ -118,32 +108,64 @@ void x86_processor_trace_init(void)
     supports_output_topa_multi = !!(leaf.c & (1<<1));
     supports_output_single = !!(leaf.c & (1<<2));
     supports_output_transport = !!(leaf.c & (1<<3));
-
-    // TODO(teisenbe): For IP filtering, MTC, CYC, and PSB support, we need
-    // to enumerate subleaf 1
 }
 
-// Returns nullptr on malloc failure.
+// IPT tracing has two "modes":
+// - per-cpu tracing
+// - thread-specific tracing
+// Tracing can only be done in one mode at a time. This is because saving/
+// restoring thread PT state via the xsaves/xrstors instructions is a global
+// flag in the XSS msr.
 
-static ipt_state_t* get_ipt_state() {
-    if (!ipt_state) {
-        uint32_t num_cpus = arch_max_num_cpus();
-        ipt_state = reinterpret_cast<ipt_state_t*>(calloc(num_cpus,
-                                                          sizeof(*ipt_state)));
-    }
-    return ipt_state;
+// Worker for mtrace_ipt_set_mode to be executed on all cpus.
+
+static void mtrace_ipt_set_mode_task(void* raw_context) {
+    DEBUG_ASSERT(arch_ints_disabled());
+    DEBUG_ASSERT(!active && raw_context);
+
+    ipt_trace_mode_t new_mode = static_cast<ipt_trace_mode_t>(reinterpret_cast<uintptr_t>(raw_context));
+
+    // PT state saving, if supported, was enabled during boot so there's no
+    // need to recalculate the xsave space needed.
+    uint64_t xss = read_msr(IA32_XSS_MSR);
+    if (new_mode == IPT_TRACE_THREADS)
+        xss |= X86_XSAVE_STATE_PT;
+    else
+        xss &= ~(0ull + X86_XSAVE_STATE_PT);
+    write_msr(IA32_XSS_MSR, xss);
+}
+
+static status_t mtrace_ipt_set_mode(ipt_trace_mode_t mode) {
+    if (active)
+        return ERR_BAD_STATE;
+    if (ipt_cpu_state)
+        return ERR_BAD_STATE;
+
+    // TODO(dje): Only change the mode when tracing is fully off in all
+    // threads?
+
+    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_set_mode_task,
+                 reinterpret_cast<void*> (mode));
+    trace_mode = mode;
+
+    return NO_ERROR;
 }
 
 // Allocate all needed state for tracing.
 
-static status_t mtrace_ipt_alloc() {
+static status_t mtrace_ipt_cpu_mode_alloc() {
+    if (trace_mode == IPT_TRACE_THREADS)
+        return ERR_BAD_STATE;
     if (active)
         return ERR_BAD_STATE;
-    if (ipt_state)
+    if (ipt_cpu_state)
         return ERR_BAD_STATE;
 
-    ipt_state = get_ipt_state();
-    if (!ipt_state)
+    uint32_t num_cpus = arch_max_num_cpus();
+    ipt_cpu_state =
+        reinterpret_cast<ipt_cpu_state_t*>(calloc(num_cpus,
+                                                  sizeof(*ipt_cpu_state)));
+    if (!ipt_cpu_state)
         return ERR_NO_MEMORY;
     return NO_ERROR;
 }
@@ -152,12 +174,14 @@ static status_t mtrace_ipt_alloc() {
 // This doesn't care if resources have already been freed to save callers
 // from having to care during any cleanup.
 
-static status_t mtrace_ipt_free() {
+static status_t mtrace_ipt_cpu_mode_free() {
+    if (trace_mode == IPT_TRACE_THREADS)
+        return ERR_BAD_STATE;
     if (active)
         return ERR_BAD_STATE;
 
-    free (ipt_state);
-    ipt_state = nullptr;
+    free (ipt_cpu_state);
+    ipt_cpu_state = nullptr;
     return NO_ERROR;    
 }
 
@@ -165,16 +189,16 @@ static void mtrace_ipt_start_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(active && raw_context);
 
-    ipt_state_t* context = reinterpret_cast<ipt_state_t*>(raw_context);
+    ipt_cpu_state_t* context = reinterpret_cast<ipt_cpu_state_t*>(raw_context);
     uint32_t cpu = arch_curr_cpu_num();
-    ipt_state_t* state = &context[cpu];
+    ipt_cpu_state_t* state = &context[cpu];
 
-    DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & RTIT_CTL_TRACE_EN));
+    DEBUG_ASSERT(!(read_msr(IA32_RTIT_CTL) & IPT_CTL_TRACE_EN));
 #if 0
     // TODO(dje): Seems like this may be preserved across reboots. True?
     // There's no real need for this test, we've already verified tracing is
     // currently disabled, so disable this check for now.
-    DEBUG_ASSERT(!(read_msr(IA32_RTIT_STATUS) & RTIT_STATUS_STOPPED));
+    DEBUG_ASSERT(!(read_msr(IA32_RTIT_STATUS) & IPT_STATUS_STOPPED));
 #endif
 
     // Load the ToPA configuration
@@ -183,7 +207,7 @@ static void mtrace_ipt_start_task(void* raw_context) {
 
     // Load all other msrs, prior to enabling tracing.
     write_msr(IA32_RTIT_STATUS, state->status);
-    write_msr(IA32_RTIT_CR3_MATCH, state->cr3_match);
+    write_msr(IA32_RTIT_CR3_MATCH, cr3_match);
 
     // Enable the trace
     write_msr(IA32_RTIT_CTL, state->ctl);
@@ -191,7 +215,7 @@ static void mtrace_ipt_start_task(void* raw_context) {
 
 // Begin the trace.
 
-static status_t mtrace_ipt_start() {
+static status_t mtrace_ipt_cpu_mode_start() {
     // TODO(dje): Could provide an API to obtain this, but we need to log
     // cr3s for potentially all processes anyway.
     // Could add this to the trace with ptwrite, but if circular buffers are
@@ -199,14 +223,16 @@ static status_t mtrace_ipt_start() {
     TRACEF("Enabling processor trace, kernel cr3: 0x%" PRIxPTR "\n",
            x86_kernel_cr3());
 
+    if (trace_mode == IPT_TRACE_THREADS)
+        return ERR_BAD_STATE;
     if (active)
         return ERR_BAD_STATE;
-    if (!ipt_state)
+    if (!ipt_cpu_state)
         return ERR_BAD_STATE;
 
     active = true;
 
-    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_start_task, ipt_state);
+    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_start_task, ipt_cpu_state);
 
     return NO_ERROR;
 }
@@ -218,9 +244,9 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(raw_context);
 
-    ipt_state_t* context = reinterpret_cast<ipt_state_t*>(raw_context);
+    ipt_cpu_state_t* context = reinterpret_cast<ipt_cpu_state_t*>(raw_context);
     uint32_t cpu = arch_curr_cpu_num();
-    ipt_state_t* state = &context[cpu];
+    ipt_cpu_state_t* state = &context[cpu];
 
     // Disable the trace
     write_msr(IA32_RTIT_CTL, 0);
@@ -230,9 +256,9 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     state->status = read_msr(IA32_RTIT_STATUS);
     state->output_base = read_msr(IA32_RTIT_OUTPUT_BASE);
     state->output_mask_ptrs = read_msr(IA32_RTIT_OUTPUT_MASK_PTRS);
-    state->cr3_match = read_msr(IA32_RTIT_CR3_MATCH);
 
-    // Zero all MSRs so that we are in the XSAVE initial configuration
+    // Zero all MSRs so that we are in the XSAVE initial configuration.
+    // This allows h/w to do some optimizations regarding the state.
     write_msr(IA32_RTIT_STATUS, 0);
     write_msr(IA32_RTIT_OUTPUT_BASE, 0);
     write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
@@ -243,95 +269,60 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
 }
 
-static status_t mtrace_ipt_stop() {
+static status_t mtrace_ipt_cpu_mode_stop() {
     TRACEF("Disabling processor trace\n");
 
+    if (trace_mode == IPT_TRACE_THREADS)
+        return ERR_BAD_STATE;
     if (!active)
         return ERR_BAD_STATE;
-    if (!ipt_state)
+    if (!ipt_cpu_state)
         return ERR_BAD_STATE;
 
-    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_stop_task, ipt_state);
+    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_stop_task, ipt_cpu_state);
 
     active = false;
     return NO_ERROR;
 }
 
-static void mtrace_ipt_stage_msr1(uint32_t action, uint32_t cpu,
-                                  uint64_t value) {
-    switch (action) {
-    case MTRACE_IPT_STAGE_CTL:
-        ipt_state[cpu].ctl = value;
-        break;
-    case MTRACE_IPT_STAGE_STATUS:
-        ipt_state[cpu].status = value;
-        break;
-    case MTRACE_IPT_STAGE_OUTPUT_BASE:
-        ipt_state[cpu].output_base = value;
-        break;
-    case MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS:
-        ipt_state[cpu].output_mask_ptrs = value;
-        break;
-    case MTRACE_IPT_STAGE_CR3_MATCH:
-        ipt_state[cpu].cr3_match = value;
-        break;
-    default:
-        DEBUG_ASSERT(false);
-    }
-}
-
-static status_t mtrace_ipt_stage_msr(uint32_t action, uint32_t options,
-                                     uint64_t value) {
-    uint32_t num_cpus = arch_max_num_cpus();
-    uint32_t options_cpu = MTRACE_IPT_OPTIONS_CPU(options);
-
+static status_t mtrace_ipt_stage_cpu_data(uint32_t options,
+                                          const mx_x86_pt_regs_t* regs) {
+    uint32_t cpu = MTRACE_IPT_OPTIONS_CPU(options);
     if ((options & ~MTRACE_IPT_OPTIONS_CPU_MASK) != 0)
         return ERR_INVALID_ARGS;
-
-    if (options_cpu < num_cpus) {
-        mtrace_ipt_stage_msr1(action, options_cpu, value);
-    } else if (options_cpu == MTRACE_IPT_ALL_CPUS) {
-        for (uint32_t cpu = 0; cpu < num_cpus; ++cpu) {
-            mtrace_ipt_stage_msr1(action, cpu, value);
-        }
-    } else {
+    uint32_t num_cpus = arch_max_num_cpus();
+    if (cpu >= num_cpus)
         return ERR_INVALID_ARGS;
-    }
+
+    ipt_cpu_state[cpu].ctl = regs->ctl;
+    ipt_cpu_state[cpu].status = regs->status;
+    ipt_cpu_state[cpu].output_base = regs->output_base;
+    ipt_cpu_state[cpu].output_mask_ptrs = regs->output_mask_ptrs;
+    ipt_cpu_state[cpu].cr3_match = regs->cr3_match;
+    static_assert(sizeof(ipt_cpu_state[cpu].addr_ranges) == sizeof(regs->addr_ranges));
+    memcpy(ipt_cpu_state[cpu].addr_ranges, regs->addr_ranges, sizeof(regs->addr_ranges));
 
     return NO_ERROR;
 }
 
-static uint64_t mtrace_ipt_get_msr1(uint32_t action, uint32_t cpu) {
-    switch (action) {
-    case MTRACE_IPT_GET_CTL:
-        return ipt_state[cpu].ctl;
-    case MTRACE_IPT_GET_STATUS:
-        return ipt_state[cpu].status;
-    case MTRACE_IPT_GET_OUTPUT_BASE:
-        return ipt_state[cpu].output_base;
-    case MTRACE_IPT_GET_OUTPUT_MASK_PTRS:
-        return ipt_state[cpu].output_mask_ptrs;
-    case MTRACE_IPT_GET_CR3_MATCH:
-        return ipt_state[cpu].cr3_match;
-    default:
-        DEBUG_ASSERT(false);
-    }
-}
-
-static status_t mtrace_ipt_get_msr(uint32_t action, uint32_t options,
-                                   uint64_t* value) {
-    uint32_t num_cpus = arch_max_num_cpus();
-    uint32_t options_cpu = MTRACE_IPT_OPTIONS_CPU(options);
-
+static status_t mtrace_ipt_get_cpu_data(uint32_t options,
+                                        mx_x86_pt_regs_t* regs) {
+    uint32_t cpu = MTRACE_IPT_OPTIONS_CPU(options);
     if ((options & ~MTRACE_IPT_OPTIONS_CPU_MASK) != 0)
         return ERR_INVALID_ARGS;
+    uint32_t num_cpus = arch_max_num_cpus();
+    if (cpu >= num_cpus)
+        return ERR_INVALID_ARGS;
 
-    if (options_cpu < num_cpus) {
-        *value = mtrace_ipt_get_msr1(action, options_cpu);
-        return NO_ERROR;
-    }
+    regs->ctl = ipt_cpu_state[cpu].ctl;
+    regs->status = ipt_cpu_state[cpu].status;
+    regs->output_base = ipt_cpu_state[cpu].output_base;
+    regs->output_mask_ptrs = ipt_cpu_state[cpu].output_mask_ptrs;
+    regs->cr3_match = ipt_cpu_state[cpu].cr3_match;
+    static_assert(sizeof(regs->addr_ranges) == sizeof(ipt_cpu_state[cpu].addr_ranges));
+    memcpy(regs->addr_ranges, ipt_cpu_state[cpu].addr_ranges, sizeof(regs->addr_ranges));
 
-    return ERR_INVALID_ARGS;
+    return NO_ERROR;
 }
 
 status_t mtrace_ipt_control(uint32_t action, uint32_t options,
@@ -340,61 +331,78 @@ status_t mtrace_ipt_control(uint32_t action, uint32_t options,
            action, options, arg, size);
 
     switch (action) {
-    case MTRACE_IPT_STAGE_CTL:
-    case MTRACE_IPT_STAGE_STATUS:
-    case MTRACE_IPT_STAGE_OUTPUT_BASE:
-    case MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS:
-    case MTRACE_IPT_STAGE_CR3_MATCH: {
-        if (active)
-            return ERR_BAD_STATE;
-        if (!ipt_state)
-            return ERR_BAD_STATE;
-        if (size != sizeof(uint64_t))
+    case MTRACE_IPT_SET_MODE: {
+        if (options != 0)
             return ERR_INVALID_ARGS;
-        uint64_t value;
-        if (arch_copy_from_user(&value, arg, size) != NO_ERROR)
+        uint32_t mode;
+        if (size != sizeof(mode))
             return ERR_INVALID_ARGS;
-        TRACEF("action %u, value 0x%" PRIx64 "\n", action, value);
-        return mtrace_ipt_stage_msr(action, options, value);
+        if (arch_copy_from_user(&mode, arg, size) != NO_ERROR)
+            return ERR_INVALID_ARGS;
+        TRACEF("action %u, mode 0x%x\n", action, mode);
+        switch (mode) {
+        case IPT_MODE_CPUS:
+            return mtrace_ipt_set_mode(IPT_TRACE_CPUS);
+        case IPT_MODE_THREADS:
+            return mtrace_ipt_set_mode(IPT_TRACE_THREADS);
+        default:
+            return ERR_INVALID_ARGS;
+        }
     }
 
-    case MTRACE_IPT_GET_CTL:
-    case MTRACE_IPT_GET_STATUS:
-    case MTRACE_IPT_GET_OUTPUT_BASE:
-    case MTRACE_IPT_GET_OUTPUT_MASK_PTRS:
-    case MTRACE_IPT_GET_CR3_MATCH: {
+    case MTRACE_IPT_STAGE_CPU_DATA: {
+        mx_x86_pt_regs_t regs;
+        if (trace_mode == IPT_TRACE_THREADS)
+            return ERR_BAD_STATE;
         if (active)
             return ERR_BAD_STATE;
-        if (!ipt_state)
+        if (!ipt_cpu_state)
             return ERR_BAD_STATE;
-        if (size != sizeof(uint64_t))
+        if (size != sizeof(regs))
             return ERR_INVALID_ARGS;
-        uint64_t value;
-        auto status = mtrace_ipt_get_msr(action, options, &value);
+        if (arch_copy_from_user(&regs, arg, size) != NO_ERROR)
+            return ERR_INVALID_ARGS;
+        TRACEF("action %u, ctl 0x%" PRIx64 ", output_base 0x%" PRIx64 "\n",
+               action, regs.ctl, regs.output_base);
+        return mtrace_ipt_stage_cpu_data(options, &regs);
+    }
+
+    case MTRACE_IPT_GET_CPU_DATA: {
+        mx_x86_pt_regs_t regs;
+        if (trace_mode == IPT_TRACE_THREADS)
+            return ERR_BAD_STATE;
+        if (active)
+            return ERR_BAD_STATE;
+        if (!ipt_cpu_state)
+            return ERR_BAD_STATE;
+        if (size != sizeof(regs))
+            return ERR_INVALID_ARGS;
+        auto status = mtrace_ipt_get_cpu_data(options, &regs);
         if (status != NO_ERROR)
             return status;
-        TRACEF("action %u, value 0x%" PRIx64 "\n", action, value);
-        if (arch_copy_to_user(arg, &value, size) != NO_ERROR)
+        TRACEF("action %u, ctl 0x%" PRIx64 ", output_base 0x%" PRIx64 "\n",
+               action, regs.ctl, regs.output_base);
+        if (arch_copy_to_user(arg, &regs, size) != NO_ERROR)
             return ERR_INVALID_ARGS;
         return NO_ERROR;
     }
 
-    case MTRACE_IPT_ALLOC:
+    case MTRACE_IPT_CPU_MODE_ALLOC:
         if (options != 0 || size != 0)
             return ERR_INVALID_ARGS;
-        return mtrace_ipt_alloc();
-    case MTRACE_IPT_START:
+        return mtrace_ipt_cpu_mode_alloc();
+    case MTRACE_IPT_CPU_MODE_START:
         if (options != 0 || size != 0)
             return ERR_INVALID_ARGS;
-        return mtrace_ipt_start();
-    case MTRACE_IPT_STOP:
+        return mtrace_ipt_cpu_mode_start();
+    case MTRACE_IPT_CPU_MODE_STOP:
         if (options != 0 || size != 0)
             return ERR_INVALID_ARGS;
-        return mtrace_ipt_stop();
-    case MTRACE_IPT_FREE:
+        return mtrace_ipt_cpu_mode_stop();
+    case MTRACE_IPT_CPU_MODE_FREE:
         if (options != 0 || size != 0)
             return ERR_INVALID_ARGS;
-        return mtrace_ipt_free();
+        return mtrace_ipt_cpu_mode_free();
 
     default:
         return ERR_INVALID_ARGS;

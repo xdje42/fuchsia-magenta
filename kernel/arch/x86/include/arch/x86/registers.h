@@ -81,6 +81,8 @@ __BEGIN_CDECLS
 
 #define X86_MAX_EXTENDED_REGISTER_SIZE 1024
 
+#define IA32_XSS_MSR 0xDA0
+
 enum x86_extended_register_feature {
     X86_EXTENDED_REGISTER_X87,
     X86_EXTENDED_REGISTER_SSE,
@@ -112,6 +114,9 @@ void x86_extended_register_restore_state(void *register_state);
 typedef struct thread thread_t;
 void x86_extended_register_context_switch(
         thread_t *old_thread, thread_t *new_thread);
+
+status_t x86_get_pt_regs(thread_t *thread, void *regs, uint32_t *buf_size);
+status_t x86_set_pt_regs(thread_t *thread, const void *regs, uint32_t buf_size);
 
 __END_CDECLS
 

@@ -362,7 +362,14 @@ syscall ktrace_write
     returns (mx_status_t);
 
 syscall mtrace_control
-    (handle: mx_handle_t, kind: uint32_t, action: uint32_t, options: uint32_t,
+    (handle: mx_handle_t,
+        kind: uint32_t, action: uint32_t, options: uint32_t,
+        ptr: any[size] INOUT, size: uint32_t)
+    returns (mx_status_t);
+
+syscall mtrace_control_thread
+    (handle: mx_handle_t, thread_handle: mx_handle_t,
+        kind: uint32_t, action: uint32_t, options: uint32_t,
         ptr: any[size] INOUT, size: uint32_t)
     returns (mx_status_t);
 

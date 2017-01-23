@@ -4,11 +4,6 @@
 
 // See the README.md in this directory for documentation.
 
-// TODOs(dje):
-// - handle driver crashes
-//   - need to turn off tracing
-//   - need to keep buffer/table vmos alive until then
-
 #include <ddk/binding.h>
 #include <ddk/device.h>
 #include <ddk/driver.h>
@@ -41,101 +36,67 @@
     } while (0)
 #endif
 
-// Macros for building entries for the Table of Physical Addresses
-#define TOPA_ENTRY_PHYS_ADDR(x) ((uint64_t)(x) & ~((1ULL<<12)-1))
-#define TOPA_ENTRY_SIZE(size_log2) ((uint64_t)((size_log2) - 12) << 6)
-#define TOPA_ENTRY_STOP (1ULL << 4)
-#define TOPA_ENTRY_INT (1ULL << 2)
-#define TOPA_ENTRY_END (1ULL << 0)
+typedef enum {
+    IPT_TRACE_CPUS,
+    IPT_TRACE_THREADS
+} ipt_trace_mode_t;
 
-// Macros for extracting info from ToPA entries
-#define TOPA_ENTRY_EXTRACT_PHYS_ADDR(e) ((mx_paddr_t)((e) & ~((1ULL<<12)-1)))
-#define TOPA_ENTRY_EXTRACT_SIZE(e) ((uint)((((e) >> 6) & 0xf) + 12))
+typedef struct ipt_per_trace_state {
+    // the cpu or thread this buffer is assigned to
+    // Which value to use is determined by the trace mode.
+    union {
+        uint32_t cpuno;
+        mx_handle_t thread;
+    } owner;
 
-// Macros for building IA32_RTIT_CTL values
-#define RTIT_CTL_TRACE_EN (1ULL<<0)
-#define RTIT_CTL_CYC_EN (1ULL<<1)
-#define RTIT_CTL_OS_ALLOWED (1ULL<<2)
-#define RTIT_CTL_USER_ALLOWED (1ULL<<3)
-#define RTIT_CTL_POWER_EVENT_EN (1ULL<<4)
-#define RTIT_CTL_FUP_ON_PTW (1ULL<<5)
-#define RTIT_CTL_FABRIC_EN (1ULL<<6)
-#define RTIT_CTL_CR3_FILTER (1ULL<<7)
-#define RTIT_CTL_TOPA (1ULL<<8)
-#define RTIT_CTL_MTC_EN (1ULL<<9)
-#define RTIT_CTL_TSC_EN (1ULL<<10)
-#define RTIT_CTL_DIS_RETC (1ULL<<11)
-#define RTIT_CTL_PTW_EN (1ULL<<12)
-#define RTIT_CTL_BRANCH_EN (1ULL<<13)
+    // number of buffers, each 2^|buffer_order| pages in size
+    uint32_t num_buffers;
+    // log2 size of each buffer, in pages
+    uint32_t buffer_order;
+    // if true then the buffer is circular, otherwise tracing stops when the
+    // buffer fills
+    bool is_circular;
+    // true if allocated
+    bool allocated;
+    // number of ToPA tables needed
+    uint32_t num_tables;
 
-// Masks for reading IA32_RTIT_STATUS
-#define RTIT_STATUS_FILTER_EN (1ULL<<0)
-#define RTIT_STATUS_CONTEXT_EN (1ULL<<1)
-#define RTIT_STATUS_TRIGGER_EN (1ULL<<2)
-#define RTIT_STATUS_ERROR (1ULL<<4)
-#define RTIT_STATUS_STOPPED (1ULL<<5)
-
-#define MAX_NUM_ADDR_RANGES 4
-
-// Valid ToPA entry sizes
-#define TOPA_MIN_SHIFT 12
-#define TOPA_MAX_SHIFT 27
-
-// Arbitarily picked constants for ourselves
-// ToPA tables are 16KB in size (technically can be up to 256MB).
-// A 16KB table provides 2047 non-END entries, so at the
-// minimum can provide a capture buffer of just under 8MB.
-#define TOPA_MAX_TABLE_ENTRIES 2048 // Use up to 16-KB tables (2048 8-byte entries)
-
-typedef struct ipt_per_cpu_state {
     // msrs
     uint64_t ctl;
     uint64_t status;
     uint64_t output_base;
     uint64_t output_mask_ptrs;
+    uint64_t cr3_match;
+    struct {
+        uint64_t a,b;
+    } addr_ranges[IPT_MAX_NUM_ADDR_RANGES];
 
     // trace buffers and ToPA tables
     // ToPA: Table of Physical Addresses
     io_buffer_t* buffers;
     io_buffer_t* topas;
-} ipt_per_cpu_state_t;
+} ipt_per_trace_state_t;
 
 typedef struct ipt_device {
     mx_device_t device;
 
-    // Number of entries in |per_cpu_state|.
-    uint32_t num_cpus;
+    ipt_trace_mode_t mode;
 
-    ipt_per_cpu_state_t* per_cpu_state;
+    // # of entries in |per_trace_state|.
+    // When tracing by cpu, this is the max number of cpus.
+    // When tracing by thread, this is the max number of threads.
+    // TODO(dje): Add support for dynamically growing the vector.
+    uint32_t num_traces;
+
+    // one entry for each trace
+    ipt_per_trace_state_t* per_trace_state;
 
     // Only one open of this device is supported at a time.
+    // TODO(dje): wip wip wip
     bool opened;
 
+    // Once tracing has started various things are not allowed until it stops.
     bool active;
-
-    // number of buffers, each 2^|buffer_order| pages in size
-    size_t num_buffers;
-
-    // log2 size of each buffer, in pages
-    uint8_t buffer_order;
-
-    // if true then the buffer is circular, otherwise tracing stops when the
-    // buffer fills
-    bool is_circular;
-
-    // number of ToPA tables needed
-    size_t num_tables;
-
-    // user configurable settings
-    uint64_t ctl_config;
-
-    // the cr3 filter value, only used if enabled
-    uint64_t cr3_filter;
-
-    // address range registers
-    struct {
-        uint64_t a,b;
-    } addr_ranges[MAX_NUM_ADDR_RANGES];
 } ipt_device_t;
 
 #define get_ipt_device(dev) containerof(dev, ipt_device_t, device)
@@ -168,16 +129,10 @@ static bool ipt_config_lip = false;
 // MAX_NUM_BUFFERS * (1 << (MAX_BUFFER_ORDER + PAGE_SIZE_SHIFT)).
 // Buffers have to be contiguous pages, but we can have a lot of them.
 // Supporting large buffers and/or lots of them is for experimentation.
-#define MAX_PER_CPU_SPACE (256 * 1024 * 1024)
-
-// default number of buffers, each 2^|buffer_order| pages in size
-#define DEFAULT_NUM_BUFFERS 16
+#define MAX_PER_TRACE_SPACE (256 * 1024 * 1024)
 
 // maximum number of buffers
 #define MAX_NUM_BUFFERS 1024
-
-// log2 size of each buffer, in pages, default is 16KB
-#define DEFAULT_BUFFER_ORDER 2
 
 // maximum size of each buffer, in pages (1MB)
 #define MAX_BUFFER_ORDER 8
@@ -188,7 +143,7 @@ static bool ipt_config_lip = false;
 #error "unsupported page size"
 #endif
 
-#define BIT(x) (1u << (x))
+#define BIT(x, b) ((x) & (1u << (b)))
 
 static mx_status_t x86_pt_free(ipt_device_t* ipt_dev);
 
@@ -215,14 +170,14 @@ static void x86_pt_init(void)
         ipt_config_model += ((a >> 16) & 0xf) << 4;
 
     __cpuid_count(0x07, 0, a, b, c, d);
-    if ((b & BIT(25)) == 0) {
+    if (!BIT(b, 25)) {
         xprintf("IPT: No PT support\n");
         return;
     }
     __cpuid_count(0x14, 0, a, b, c, d);
-    if (b & BIT(2))
+    if (BIT(b, 2))
         ipt_config_addr_cfg_max = 2;
-    if ((b & BIT(1)) && a >= 1) {
+    if (BIT(b, 1) && a >= 1) {
         unsigned a1, b1, c1, d1;
         __cpuid_count(0x14, 1, a1, b1, c1, d1);
         ipt_config_mtc_freq_mask = (a1 >> 16) & 0xffff;
@@ -238,51 +193,86 @@ static void x86_pt_init(void)
             ipt_config_bus_freq = 1. / ((float)a1 / (float)b1);
     }
 
-    ipt_config_cr3_filtering = !!(b & BIT(0));
-    ipt_config_psb = !!(b & BIT(1));
-    ipt_config_ip_filtering = !!(b & BIT(2));
-    ipt_config_mtc = !!(b & BIT(3));
-    ipt_config_ptwrite = !!(b & BIT(4));
-    ipt_config_power_events = !!(b & BIT(5));
+    ipt_config_cr3_filtering = !!BIT(b, 0);
+    ipt_config_psb = !!BIT(b, 1);
+    ipt_config_ip_filtering = !!BIT(b, 2);
+    ipt_config_mtc = !!BIT(b, 3);
+    ipt_config_ptwrite = !!BIT(b, 4);
+    ipt_config_power_events = !!BIT(b, 5);
 
-    ipt_config_output_topa = !!(c & BIT(0));
-    ipt_config_output_topa_multi = !!(c & BIT(1));
-    ipt_config_output_single = !!(c & BIT(2));
-    ipt_config_output_transport = !!(c & BIT(3));
-    ipt_config_lip = !!(c & BIT(31));
+    ipt_config_output_topa = !!BIT(c, 0);
+    ipt_config_output_topa_multi = !!BIT(c, 1);
+    ipt_config_output_single = !!BIT(c, 2);
+    ipt_config_output_transport = !!BIT(c, 3);
+    ipt_config_lip = !!BIT(c, 31);
+}
+
+// |mode| is one of IPT_MODE_{CPUS,THREADS}.
+
+static mx_status_t x86_pt_set_mode(ipt_device_t* ipt_dev, uint32_t mode) {
+    // TODO(dje): Only change the mode when tracing is fully off in all
+    // threads?
+    if (ipt_dev->active)
+        return ERR_BAD_STATE;
+
+    switch (mode) {
+    case IPT_MODE_CPUS:
+    case IPT_MODE_THREADS:
+        break;
+    default:
+        return ERR_INVALID_ARGS;
+    }
+
+    mx_handle_t resource = get_root_resource();
+    mx_status_t status =
+        mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_SET_MODE, 0, &mode, sizeof(mode));
+    if (status != NO_ERROR)
+        return status;
+
+    switch (mode) {
+    case IPT_MODE_CPUS:
+        ipt_dev->mode = IPT_TRACE_CPUS;
+        break;
+    case IPT_MODE_THREADS:
+        ipt_dev->mode = IPT_TRACE_THREADS;
+        break;
+    default:
+        assert(false);
+    }
+
+    return NO_ERROR;
 }
 
 // Create the ToPA for the configured number of pages for |cpu|.
 // A circular collection of buffers is set up, even if we're going to apply
 // the stop bit to the last entry.
 
-static void make_topa(ipt_device_t* ipt_dev, uint32_t cpu) {
-    ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
-    const size_t run_len_log2 = ipt_dev->buffer_order;
-    assert(run_len_log2 + PAGE_SIZE_SHIFT <= TOPA_MAX_SHIFT);
-    assert(run_len_log2 + PAGE_SIZE_SHIFT >= TOPA_MIN_SHIFT);
+static void make_topa(ipt_device_t* ipt_dev, ipt_per_trace_state_t* per_trace) {
+    const size_t run_len_log2 = per_trace->buffer_order;
+    assert(run_len_log2 + PAGE_SIZE_SHIFT <= IPT_TOPA_MAX_SHIFT);
+    assert(run_len_log2 + PAGE_SIZE_SHIFT >= IPT_TOPA_MIN_SHIFT);
 
-    size_t curr_table = 0;
-    size_t curr_idx = 0;
+    uint32_t curr_table = 0;
+    uint32_t curr_idx = 0;
     uint64_t* last_entry = NULL;
 
     // Note: An early version of this patch auto-computed the desired grouping
     // of pages with sufficient alignment. If you find yourself needing this
     // functionality again, see change 9470.
 
-    for (size_t i = 0; i < ipt_dev->num_buffers; ++i) {
-        io_buffer_t* buffer = &per_cpu->buffers[i];
-        io_buffer_t* topa = &per_cpu->topas[curr_table];
+    for (uint32_t i = 0; i < per_trace->num_buffers; ++i) {
+        io_buffer_t* buffer = &per_trace->buffers[i];
+        io_buffer_t* topa = &per_trace->topas[curr_table];
         mx_paddr_t pa = io_buffer_phys(buffer);
 
-        uint64_t val = TOPA_ENTRY_PHYS_ADDR(pa) |
-            TOPA_ENTRY_SIZE(run_len_log2 + PAGE_SIZE_SHIFT);
+        uint64_t val = IPT_TOPA_ENTRY_PHYS_ADDR(pa) |
+            IPT_TOPA_ENTRY_SIZE(run_len_log2 + PAGE_SIZE_SHIFT);
         uint64_t* table = io_buffer_virt(topa);
         table[curr_idx] = val;
         last_entry = &table[curr_idx];
 
         // Make sure we leave one at the end of the table for the END marker
-        if (unlikely(curr_idx >= TOPA_MAX_TABLE_ENTRIES - 2)) {
+        if (unlikely(curr_idx >= IPT_TOPA_MAX_TABLE_ENTRIES - 2)) {
             curr_idx = 0;
             curr_table++;
         } else {
@@ -290,88 +280,86 @@ static void make_topa(ipt_device_t* ipt_dev, uint32_t cpu) {
         }
     }
 
-    assert(curr_table + 1 == ipt_dev->num_tables ||
+    assert(curr_table + 1 == per_trace->num_tables ||
            // If the last table is full curr_table will be the next one.
-           curr_table == ipt_dev->num_tables);
+           curr_table == per_trace->num_tables);
 
     // Populate END entries for completed tables
     // Assume the table is circular. We'll set the stop bit on the last
     // entry later.
-    for (size_t i = 0; i < curr_table; ++i) {
-        io_buffer_t* this_table = &per_cpu->topas[i];
+    for (uint32_t i = 0; i < curr_table; ++i) {
+        io_buffer_t* this_table = &per_trace->topas[i];
         io_buffer_t* next_table;
-        if (i == ipt_dev->num_tables - 1) {
-            next_table = &per_cpu->topas[0];
+        if (i == per_trace->num_tables - 1) {
+            next_table = &per_trace->topas[0];
         } else {
-            next_table = &per_cpu->topas[i + 1];
+            next_table = &per_trace->topas[i + 1];
         }
 
         mx_paddr_t next_table_pa = io_buffer_phys(next_table);
-        uint64_t val = TOPA_ENTRY_PHYS_ADDR(next_table_pa) | TOPA_ENTRY_END;
+        uint64_t val = IPT_TOPA_ENTRY_PHYS_ADDR(next_table_pa) | IPT_TOPA_ENTRY_END;
         uint64_t* table = io_buffer_virt(this_table);
-        table[TOPA_MAX_TABLE_ENTRIES - 1] = val;
+        table[IPT_TOPA_MAX_TABLE_ENTRIES - 1] = val;
     }
 
     // Populate the END entry for a possibly non-full last table
-    if (curr_table < ipt_dev->num_tables) {
-        io_buffer_t* this_table = &per_cpu->topas[curr_table];
-        io_buffer_t* first_table = &per_cpu->topas[0];
+    if (curr_table < per_trace->num_tables) {
+        io_buffer_t* this_table = &per_trace->topas[curr_table];
+        io_buffer_t* first_table = &per_trace->topas[0];
         mx_paddr_t first_table_pa = io_buffer_phys(first_table);
-        uint64_t val = TOPA_ENTRY_PHYS_ADDR(first_table_pa) | TOPA_ENTRY_END;
+        uint64_t val = IPT_TOPA_ENTRY_PHYS_ADDR(first_table_pa) | IPT_TOPA_ENTRY_END;
         uint64_t* table = io_buffer_virt(this_table);
         table[curr_idx] = val;
     }
 
     // Add the STOP flag to the last non-END entry in the tables
     assert(last_entry);
-    if (!ipt_dev->is_circular)
-        *last_entry |= TOPA_ENTRY_STOP;
+    if (!per_trace->is_circular)
+        *last_entry |= IPT_TOPA_ENTRY_STOP;
 }
 
 // Compute the number of ToPA entries needed for the configured number of
 // buffers.
 // The output count includes the END entries across all needed tables.
 
-static size_t compute_topa_entry_count(ipt_device_t* ipt_dev) {
-    size_t num_entries = ipt_dev->num_buffers;
-    size_t num_end_entries = (num_entries + TOPA_MAX_TABLE_ENTRIES - 2) /
-        (TOPA_MAX_TABLE_ENTRIES - 1);
-    size_t result = num_entries + num_end_entries;
+static uint32_t compute_topa_entry_count(ipt_device_t* ipt_dev, ipt_per_trace_state_t* per_trace) {
+    uint32_t num_entries = per_trace->num_buffers;
+    uint32_t num_end_entries = (num_entries + IPT_TOPA_MAX_TABLE_ENTRIES - 2) /
+        (IPT_TOPA_MAX_TABLE_ENTRIES - 1);
+    uint32_t result = num_entries + num_end_entries;
 
-    xprintf("IPT: compute_topa_entry_count: num_entries: %zu\n", num_entries);
-    xprintf("IPT: compute_topa_entry_count: num_end_entries: %zu\n", num_end_entries);
-    xprintf("IPT: compute_topa_entry_count: total entries: %zu\n", result);
+    xprintf("IPT: compute_topa_entry_count: num_entries: %u\n", num_entries);
+    xprintf("IPT: compute_topa_entry_count: num_end_entries: %u\n", num_end_entries);
+    xprintf("IPT: compute_topa_entry_count: total entries: %u\n", result);
 
     return result;
 }
 
-// Walk the tables to discover how much data has been captured for |cpu|.
+// Walk the tables to discover how much data has been captured for |per_trace|.
 
-static size_t compute_capture_size(ipt_device_t* ipt_dev, uint32_t cpu) {
-    ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
+static size_t compute_capture_size(ipt_device_t* ipt_dev, ipt_per_trace_state_t* per_trace) {
+    uint64_t curr_table_paddr = per_trace->output_base;
+    uint32_t curr_table_entry_idx = (uint32_t)per_trace->output_mask_ptrs >> 7;
+    uint32_t curr_entry_offset = (uint32_t)(per_trace->output_mask_ptrs >> 32);
 
-    uint64_t curr_table_paddr = per_cpu->output_base;
-    uint32_t curr_table_entry_idx = (uint32_t)per_cpu->output_mask_ptrs >> 7;
-    uint32_t curr_entry_offset = (uint32_t)(per_cpu->output_mask_ptrs >> 32);
-
-    xprintf("IPT: compute_capture_size: cpu %u\n", cpu);
+    xprintf("IPT: compute_capture_size: trace %tu\n", per_trace - ipt_dev->per_trace_state);
     xprintf("IPT: curr_table_paddr 0x%" PRIx64 ", curr_table_entry_idx %u, curr_entry_offset %u\n",
             curr_table_paddr, curr_table_entry_idx, curr_entry_offset);
 
     size_t total_size = 0;
-    for (size_t table = 0; table < ipt_dev->num_tables; ++table) {
+    for (uint32_t table = 0; table < per_trace->num_tables; ++table) {
         // Get the physical address so that we can compare it with the value
         // in output_base.
-        mx_paddr_t table_paddr = io_buffer_phys(&per_cpu->topas[table]);
+        mx_paddr_t table_paddr = io_buffer_phys(&per_trace->topas[table]);
 
-        for (size_t entry = 0; entry < TOPA_MAX_TABLE_ENTRIES - 1; ++entry) {
+        for (uint32_t entry = 0; entry < IPT_TOPA_MAX_TABLE_ENTRIES - 1; ++entry) {
             if (table_paddr == curr_table_paddr && entry >= curr_table_entry_idx) {
                 total_size += curr_entry_offset;
                 return total_size;
             }
-            uint64_t* table_ptr = io_buffer_virt(&per_cpu->topas[table]);
+            uint64_t* table_ptr = io_buffer_virt(&per_trace->topas[table]);
             uint64_t topa_entry = table_ptr[entry];
-            total_size += 1UL << TOPA_ENTRY_EXTRACT_SIZE(topa_entry);
+            total_size += 1UL << IPT_TOPA_ENTRY_EXTRACT_SIZE(topa_entry);
         }
     }
 
@@ -381,36 +369,37 @@ static size_t compute_capture_size(ipt_device_t* ipt_dev, uint32_t cpu) {
     return 0;
 }
 
-// Subroutine of x86_pt_alloc() to simplify it.
-
-static mx_status_t x86_pt_alloc1(ipt_device_t* ipt_dev) {
+static mx_status_t x86_pt_alloc_buffer1(ipt_device_t* ipt_dev, ipt_per_trace_state_t* per_trace,
+                                        uint32_t num, uint32_t order, bool is_circular) {
     mx_status_t status;
-    uint32_t num_cpus = mx_num_cpus();
-    size_t buffer_pages = 1 << ipt_dev->buffer_order;
+    size_t buffer_pages = 1 << order;
 
-    for (uint32_t cpu = 0; cpu < num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
+    per_trace->num_buffers = num;
+    per_trace->buffer_order = order;
+    per_trace->is_circular = is_circular;
 
-        per_cpu->buffers = calloc(ipt_dev->num_buffers, sizeof(io_buffer_t));
-        if (per_cpu->buffers == NULL)
-            return ERR_NO_MEMORY;
+    per_trace->buffers = calloc(per_trace->num_buffers, sizeof(io_buffer_t));
+    if (per_trace->buffers == NULL)
+        return ERR_NO_MEMORY;
 
-        for (size_t i = 0; i < ipt_dev->num_buffers; ++i) {
-            // ToPA entries of size N must be aligned to N, too.
-            uint8_t alignment_log2 = PAGE_SIZE_SHIFT + ipt_dev->buffer_order;
-            status = io_buffer_init_aligned(&per_cpu->buffers[i], buffer_pages * PAGE_SIZE, alignment_log2, IO_BUFFER_RW);
-            if (status != NO_ERROR)
-                return status;
-        }
+    for (uint32_t i = 0; i < num; ++i) {
+        // ToPA entries of size N must be aligned to N, too.
+        uint32_t alignment_log2 = PAGE_SIZE_SHIFT + order;
+        status = io_buffer_init_aligned(&per_trace->buffers[i], buffer_pages * PAGE_SIZE, alignment_log2, IO_BUFFER_RW);
+        if (status != NO_ERROR)
+            return status;
+        // Keep track of allocated buffers as we go in case we later fail:
+        // we want to be able to free those that got allocated.
+        ++per_trace->num_buffers;
     }
 
     // TODO(dje): No need to allocate the max on the last table.
-    size_t entry_count = compute_topa_entry_count(ipt_dev);
-    size_t table_count = (entry_count + TOPA_MAX_TABLE_ENTRIES - 1) /
-            TOPA_MAX_TABLE_ENTRIES;
+    uint32_t entry_count = compute_topa_entry_count(ipt_dev, per_trace);
+    uint32_t table_count = (entry_count + IPT_TOPA_MAX_TABLE_ENTRIES - 1) /
+            IPT_TOPA_MAX_TABLE_ENTRIES;
 
     if (entry_count < 2) {
-        xprintf("IPT: INVALID ENTRY COUNT: %zu\n", entry_count);
+        xprintf("IPT: INVALID ENTRY COUNT: %u\n", entry_count);
         return ERR_INVALID_ARGS;
     }
 
@@ -421,95 +410,177 @@ static mx_status_t x86_pt_alloc1(ipt_device_t* ipt_dev) {
 
     // Allocate Table(s) of Physical Addresses (ToPA) for each cpu.
 
-    ipt_dev->num_tables = table_count;
+    per_trace->topas = calloc(table_count, sizeof(io_buffer_t));
+    if (per_trace->topas == NULL)
+        return ERR_NO_MEMORY;
 
-    for (uint32_t cpu = 0; cpu < num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
-
-        per_cpu->topas = calloc(table_count, sizeof(io_buffer_t));
-        if (per_cpu->topas == NULL)
+    for (uint32_t i = 0; i < table_count; ++i) {
+        status = io_buffer_init(&per_trace->topas[i], sizeof(uint64_t) * IPT_TOPA_MAX_TABLE_ENTRIES, IO_BUFFER_RW);
+        if (status != NO_ERROR)
             return ERR_NO_MEMORY;
-
-        for (size_t i = 0; i < table_count; ++i) {
-            status = io_buffer_init(&per_cpu->topas[i], sizeof(uint64_t) * TOPA_MAX_TABLE_ENTRIES, IO_BUFFER_RW);
-            if (status != NO_ERROR)
-                return ERR_NO_MEMORY;
-        }
-
-        make_topa(ipt_dev, cpu);
+        // Keep track of allocated tables as we go in case we later fail:
+        // we want to be able to free those that got allocated.
+        ++per_trace->num_tables;
     }
 
+    make_topa(ipt_dev, per_trace);
+
+    return NO_ERROR;
+}
+
+static void x86_pt_free_buffer1(ipt_device_t* ipt_dev, ipt_per_trace_state_t* per_trace) {
+    for (uint32_t i = 0; i < per_trace->num_buffers; ++i) {
+        io_buffer_release(&per_trace->buffers[i]);
+    }
+    free(per_trace->buffers);
+    per_trace->buffers = NULL;
+
+    for (uint32_t i = 0; i < per_trace->num_tables; ++i) {
+        io_buffer_release(&per_trace->topas[i]);
+    }
+    free(per_trace->topas);
+    per_trace->topas = NULL;
+}
+
+static mx_status_t x86_pt_alloc_buffer(ipt_device_t* ipt_dev,
+                                       const ioctl_ipt_buffer_config_t* config,
+                                       uint32_t* out_index) {
+    if (config->num_buffers == 0 || config->num_buffers > MAX_NUM_BUFFERS)
+        return ERR_INVALID_ARGS;
+    if (config->buffer_order > MAX_BUFFER_ORDER)
+        return ERR_INVALID_ARGS;
+    size_t buffer_pages = 1 << config->buffer_order;
+    size_t nr_pages = config->num_buffers * buffer_pages;
+    size_t total_per_trace = nr_pages * PAGE_SIZE;
+    if (total_per_trace > MAX_PER_TRACE_SPACE)
+        return ERR_INVALID_ARGS;
+
+    uint64_t settable_ctl_mask = (
+        IPT_CTL_OS_ALLOWED |
+        IPT_CTL_USER_ALLOWED |
+        IPT_CTL_TSC_EN |
+        IPT_CTL_DIS_RETC |
+        IPT_CTL_BRANCH_EN
+        );
+    if (ipt_config_ptwrite)
+        settable_ctl_mask |= IPT_CTL_PTW_EN | IPT_CTL_FUP_ON_PTW;
+    if (ipt_config_cr3_filtering)
+        settable_ctl_mask |= IPT_CTL_CR3_FILTER;
+    if (ipt_config_mtc)
+        settable_ctl_mask |= IPT_CTL_MTC_EN | IPT_CTL_MTC_FREQ;
+    if (ipt_config_power_events)
+        settable_ctl_mask |= IPT_CTL_POWER_EVENT_EN;
+    if (ipt_config_ip_filtering)
+        settable_ctl_mask |= (IPT_CTL_ADDR0 |
+                              IPT_CTL_ADDR1 |
+                              IPT_CTL_ADDR2 |
+                              IPT_CTL_ADDR3);
+    if (ipt_config_psb)
+        settable_ctl_mask |= (IPT_CTL_CYC_EN |
+                              IPT_CTL_PSB_FREQ |
+                              IPT_CTL_CYC_THRESH);
+    if ((config->ctl & ~settable_ctl_mask) != 0)
+        return ERR_INVALID_ARGS;
+
+    uint32_t index;
+    for (index = 0; index < ipt_dev->num_traces; ++index) {
+        if (!ipt_dev->per_trace_state[index].allocated)
+            break;
+    }
+    if (index == ipt_dev->num_traces)
+        return ERR_NO_RESOURCES;
+
+    ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[index];
+    memset(per_trace, 0, sizeof(*per_trace));
+    mx_status_t status = x86_pt_alloc_buffer1(ipt_dev, per_trace,
+                                              config->num_buffers, config->buffer_order, config->is_circular);
+    if (status != NO_ERROR) {
+        x86_pt_free_buffer1(ipt_dev, per_trace);
+        return status;
+    }
+
+    per_trace->ctl = config->ctl;
+    per_trace->status = 0;
+    per_trace->output_base = io_buffer_phys(&per_trace->topas[0]);
+    per_trace->output_mask_ptrs = 0;
+    per_trace->cr3_match = config->cr3_match;
+    static_assert(sizeof(per_trace->addr_ranges) == sizeof(config->addr_ranges),
+                  "addr range size mismatch");
+    memcpy(per_trace->addr_ranges, config->addr_ranges, sizeof(config->addr_ranges));
+    per_trace->allocated = true;
+    *out_index = index;
+    return NO_ERROR;
+}
+
+static mx_status_t x86_pt_assign_buffer_thread(ipt_device_t* ipt_dev, uint32_t index, mx_handle_t thread) {
+    mx_handle_close(thread);
+    return ERR_NOT_SUPPORTED;
+}
+
+static mx_status_t x86_pt_release_buffer_thread(ipt_device_t* ipt_dev, uint32_t index, mx_handle_t thread) {
+    mx_handle_close(thread);
+    return ERR_NOT_SUPPORTED;
+}
+
+static mx_status_t x86_pt_free_buffer(ipt_device_t* ipt_dev, uint32_t index) {
+    if (ipt_dev->active)
+        return ERR_BAD_STATE;
+    if (index >= ipt_dev->num_traces)
+        return ERR_INVALID_ARGS;
+    assert(ipt_dev->per_trace_state);
+    ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[index];
+    if (!per_trace->allocated)
+        return ERR_INVALID_ARGS;
+    x86_pt_free_buffer1(ipt_dev, per_trace);
+    per_trace->allocated = false;
     return NO_ERROR;
 }
 
 // Allocate space for the trace buffers, for each cpu,
 // and do any other initialization needed prior to starting a trace.
 
-static mx_status_t x86_pt_alloc(ipt_device_t* ipt_dev) {
-    // TODO(dje): For now we only support ToPA.
-    if (!ipt_config_output_topa)
-        return ERR_NOT_SUPPORTED;
-
+static mx_status_t x86_pt_cpu_mode_alloc(ipt_device_t* ipt_dev) {
     // TODO: lock
     if (ipt_dev->active)
         return ERR_BAD_STATE;
-
-    mx_status_t status = x86_pt_alloc1(ipt_dev);
-    if (status != NO_ERROR) {
-        x86_pt_free(ipt_dev);
-        return status;
-    }
+    if (ipt_dev->mode != IPT_TRACE_CPUS)
+        return ERR_BAD_STATE;
 
     mx_handle_t resource = get_root_resource();
-    status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_ALLOC, 0, NULL, 0);
-    if (status != NO_ERROR)
-        return status;
-
-    return NO_ERROR;
+    return mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_CPU_MODE_ALLOC, 0, NULL, 0);
 }
 
-// Begin tracing.
+// Begin tracing, cpu mode.
 
-static mx_status_t x86_pt_start(ipt_device_t* ipt_dev) {
+static mx_status_t x86_pt_cpu_mode_start(ipt_device_t* ipt_dev) {
     if (ipt_dev->active)
         return ERR_BAD_STATE;
-    if (!ipt_dev->per_cpu_state)
+    if (ipt_dev->mode != IPT_TRACE_CPUS)
         return ERR_BAD_STATE;
+    assert(ipt_dev->per_trace_state);
 
     mx_handle_t resource = get_root_resource();
     mx_status_t status;
 
-    for (uint32_t cpu = 0; cpu < ipt_dev->num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
+    for (uint32_t cpu = 0; cpu < ipt_dev->num_traces; ++cpu) {
+        ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[cpu];
 
-        // Stage the ctl value for enabling the trace
-        uint64_t ctl = ipt_dev->ctl_config;
-        ctl |= RTIT_CTL_TOPA | RTIT_CTL_TRACE_EN;
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_CTL,
-                                   cpu, &ctl, sizeof(ctl));
-        if (status != NO_ERROR)
-            return status;
+        mx_x86_pt_regs_t regs;
+        regs.ctl = per_trace->ctl;
+        regs.ctl |= IPT_CTL_TOPA | IPT_CTL_TRACE_EN;
+        regs.status = per_trace->status;
+        regs.output_base = per_trace->output_base;
+        regs.output_mask_ptrs = per_trace->output_mask_ptrs;
+        regs.cr3_match = per_trace->cr3_match;
+        memcpy(regs.addr_ranges, per_trace->addr_ranges, sizeof(per_trace->addr_ranges));
 
-        uint64_t status = 0;
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_STATUS,
-                                   cpu, &status, sizeof(status));
-        if (status != NO_ERROR)
-            return status;
-
-        uint64_t output_base = io_buffer_phys(&per_cpu->topas[0]);
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_OUTPUT_BASE,
-                                   cpu, &output_base, sizeof(output_base));
-        if (status != NO_ERROR)
-            return status;
-
-        uint64_t output_mask_ptrs = 0;
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_OUTPUT_MASK_PTRS,
-                                   cpu, &output_mask_ptrs, sizeof(output_mask_ptrs));
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STAGE_CPU_DATA,
+                                   cpu, &regs, sizeof(regs));
         if (status != NO_ERROR)
             return status;
     }
 
-    status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_START,
+    status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_CPU_MODE_START,
                                0, NULL, 0);
     if (status != NO_ERROR)
         return status;
@@ -519,89 +590,47 @@ static mx_status_t x86_pt_start(ipt_device_t* ipt_dev) {
 
 // Stop tracing.
 
-static mx_status_t x86_pt_stop(ipt_device_t* ipt_dev) {
+static mx_status_t x86_pt_cpu_mode_stop(ipt_device_t* ipt_dev) {
     if (!ipt_dev->active)
         return ERR_BAD_STATE;
+    assert(ipt_dev->per_trace_state);
 
     mx_handle_t resource = get_root_resource();
 
-    mx_status_t status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_STOP,
+    mx_status_t status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_CPU_MODE_STOP,
                                            0, NULL, 0);
     if (status != NO_ERROR)
         return status;
     ipt_dev->active = false;
 
-    for (uint32_t cpu = 0; cpu < ipt_dev->num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
+    for (uint32_t cpu = 0; cpu < ipt_dev->num_traces; ++cpu) {
+        ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[cpu];
 
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_CTL,
-                                   cpu, &per_cpu->ctl, sizeof(per_cpu->ctl));
+        mx_x86_pt_regs_t regs;
+        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_CPU_DATA,
+                                   cpu, &regs, sizeof(regs));
         if (status != NO_ERROR)
             return status;
-
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_STATUS,
-                                   cpu, &per_cpu->status, sizeof(per_cpu->status));
-        if (status != NO_ERROR)
-            return status;
-
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_OUTPUT_BASE,
-                                   cpu, &per_cpu->output_base, sizeof(per_cpu->output_base));
-        if (status != NO_ERROR)
-            return status;
-
-        status = mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_GET_OUTPUT_MASK_PTRS,
-                                   cpu, &per_cpu->output_mask_ptrs, sizeof(per_cpu->output_mask_ptrs));
-        if (status != NO_ERROR)
-            return status;
+        per_trace->ctl = regs.ctl;
+        per_trace->status = regs.status;
+        per_trace->output_base = regs.output_base;
+        per_trace->output_mask_ptrs = regs.output_mask_ptrs;
+        per_trace->cr3_match = regs.cr3_match;
+        memcpy(per_trace->addr_ranges, regs.addr_ranges, sizeof(per_trace->addr_ranges));
     }
 
     return NO_ERROR;
 }
 
-// On success |*capture_size| will be populated with the amount of data
-// captured for |cpu|.
+// Release resources acquired by x86_pt_cpu_mode_alloc.
 
-static mx_status_t x86_pt_read_size(ipt_device_t* ipt_dev, uint32_t cpu, size_t* capture_size) {
-    if (cpu >= ipt_dev->num_cpus)
-        return ERR_INVALID_ARGS;
+static mx_status_t x86_pt_cpu_mode_free(ipt_device_t* ipt_dev) {
     if (ipt_dev->active)
         return ERR_BAD_STATE;
-
-    ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
-    if (!per_cpu->topas)
-        return ERR_BAD_STATE;
-
-    // TODO(dje): Handle if called before tracing done.
-
-    *capture_size = compute_capture_size(ipt_dev, cpu);
-    return NO_ERROR;
-}
-
-// Release resources acquired by x86_pt_alloc.
-
-static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
-    if (ipt_dev->active)
-        return ERR_BAD_STATE;
-
-    for (uint32_t cpu = 0; cpu < ipt_dev->num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
-
-        for (size_t i = 0; i < ipt_dev->num_buffers; ++i) {
-            io_buffer_release(&per_cpu->buffers[i]);
-        }
-        free(per_cpu->buffers);
-        per_cpu->buffers = NULL;
-
-        for (size_t i = 0; i < ipt_dev->num_tables; ++i) {
-            io_buffer_release(&per_cpu->topas[i]);
-        }
-        free(per_cpu->topas);
-        per_cpu->topas = NULL;
-    }
 
     mx_handle_t resource = get_root_resource();
     mx_status_t status =
-        mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_FREE, 0, NULL, 0);
+        mx_mtrace_control(resource, MTRACE_KIND_IPT, MTRACE_IPT_CPU_MODE_FREE, 0, NULL, 0);
     // TODO(dje): This really shouldn't fail. What to do?
     // For now flag things as busted and prevent further use.
     if (status != NO_ERROR)
@@ -610,97 +639,34 @@ static mx_status_t x86_pt_free(ipt_device_t* ipt_dev) {
     return NO_ERROR;
 }
 
-static mx_status_t x86_pt_set_buffer_size(ipt_device_t* ipt_dev, size_t num, size_t order, bool is_circular) {
-    if (num == 0 || num > MAX_NUM_BUFFERS)
-        return ERR_INVALID_ARGS;
-    if (order > MAX_BUFFER_ORDER)
-        return ERR_INVALID_ARGS;
-    size_t buffer_pages = 1 << order;
-    size_t nr_pages = num * buffer_pages;
-    size_t total_per_cpu = nr_pages * PAGE_SIZE;
-    if (total_per_cpu > MAX_PER_CPU_SPACE)
-        return ERR_INVALID_ARGS;
-    ipt_dev->buffer_order = order;
-    ipt_dev->num_buffers = num;
-    ipt_dev->is_circular = is_circular;
-    return NO_ERROR;
-}
-
-static mx_status_t x86_pt_set_ctl_config(ipt_device_t* ipt_dev, uint64_t ctl_config) {
-    const uint64_t settable_mask = (
-        IPT_CTL_CYC_EN |
-        IPT_CTL_OS_ALLOWED |
-        IPT_CTL_USER_ALLOWED |
-        IPT_CTL_POWER_EVENT_EN |
-        IPT_CTL_FUP_ON_PTW |
-        IPT_CTL_CR3_FILTER |
-        IPT_CTL_MTC_EN |
-        IPT_CTL_TSC_EN |
-        IPT_CTL_DIS_RETC |
-        IPT_CTL_PTW_EN |
-        IPT_CTL_BRANCH_EN |
-        IPT_CTL_MTC_FREQ |
-        IPT_CTL_CYC_THRESH |
-        IPT_CTL_PSB_FREQ |
-        IPT_CTL_ADDR0 |
-        IPT_CTL_ADDR1 |
-        IPT_CTL_ADDR2 |
-        IPT_CTL_ADDR3
-        );
-    if ((ctl_config & ~settable_mask) != 0)
-        return ERR_INVALID_ARGS;
-    ipt_dev->ctl_config = ctl_config;
-    // TODO(dje): Check for unsupported bits being set.
-    return NO_ERROR;
-}
-
-static mx_status_t x86_pt_set_cr3_filter(ipt_device_t* ipt_dev, uint64_t cr3_filter) {
-    ipt_dev->cr3_filter = cr3_filter;
-    return NO_ERROR;
-}
-
-static mx_status_t x86_pt_set_addr_config(ipt_device_t* ipt_dev, size_t range, size_t a, size_t b) {
-    if (range > ipt_config_addr_range_num)
-        return ERR_INVALID_ARGS;
-    ipt_dev->addr_ranges[range].a = a;
-    ipt_dev->addr_ranges[range].b = b;
-    return NO_ERROR;
-}
-
 
 // The DDK interface
 
 static mx_status_t ipt_open(mx_device_t* dev, mx_device_t** dev_out, uint32_t flags) {
+    // TODO(dje): For now we only support ToPA.
+    if (!ipt_config_output_topa)
+        return ERR_NOT_SUPPORTED;
+
     // TODO(dje): What's the best way to allow only one open at a time?
     // [We could allow multiple, but multiple clients trying to control
-    // tracing is problematic, and currently not supported.
+    // tracing is problematic so just punt.]
+    // TODO(dje): Locking
     ipt_device_t* ipt_dev = get_ipt_device(dev);
     if (ipt_dev->opened)
         return ERR_ALREADY_BOUND;
 
-    if (ipt_dev->active && !ipt_dev->per_cpu_state)
-        return ERR_BAD_STATE;
+    if (ipt_dev->active)
+        assert(ipt_dev->per_trace_state);
 
-    if (!ipt_dev->active && !ipt_dev->per_cpu_state) {
-        // TODO(dje): hotplugging/unplugging: later.
-        ipt_dev->num_cpus = mx_num_cpus();
+    if (!ipt_dev->per_trace_state) {
+        ipt_dev->num_traces = mx_num_cpus();
 
-        ipt_dev->per_cpu_state = calloc(ipt_dev->num_cpus, sizeof(ipt_dev->per_cpu_state[0]));
-        if (!ipt_dev->per_cpu_state)
+        ipt_dev->per_trace_state = calloc(ipt_dev->num_traces, sizeof(ipt_dev->per_trace_state[0]));
+        if (!ipt_dev->per_trace_state)
             return ERR_NO_MEMORY;
 
-        ipt_dev->num_tables = 0;
-
         // reset values that have defaults
-        ipt_dev->num_buffers = DEFAULT_NUM_BUFFERS;
-        ipt_dev->buffer_order = DEFAULT_BUFFER_ORDER;
-        ipt_dev->is_circular = false;
-        ipt_dev->ctl_config = (
-            RTIT_CTL_USER_ALLOWED | RTIT_CTL_OS_ALLOWED |
-            RTIT_CTL_BRANCH_EN |
-            RTIT_CTL_TSC_EN
-            //RTIT_CTL_PTW_EN -- causes gpf
-            );
+        ipt_dev->mode = IPT_TRACE_CPUS;
     }
 
     ipt_dev->opened = true;
@@ -714,75 +680,153 @@ static mx_status_t ipt_close(mx_device_t* dev, uint32_t flags) {
     return NO_ERROR;
 }
 
-static ssize_t ipt_write_file(ipt_device_t* ipt_dev,
-                              const void* cmd, size_t cmdlen,
-                              void* reply, size_t max) {
+static ssize_t ipt_set_mode(ipt_device_t* ipt_dev,
+                            const void* cmd, size_t cmdlen,
+                            void* reply, size_t max) {
+    if (max != 0)
+        return ERR_INVALID_ARGS;
+    uint32_t mode;
+    if (cmdlen != sizeof(mode))
+        return ERR_INVALID_ARGS;
+    memcpy(&mode, cmd, sizeof(mode));
+    return x86_pt_set_mode(ipt_dev, mode);
+}
+
+static ssize_t ipt_alloc_buffer(ipt_device_t* ipt_dev,
+                                const void* cmd, size_t cmdlen,
+                                void* reply, size_t max) {
+    ioctl_ipt_buffer_config_t config;
+    if (cmdlen != sizeof(config))
+        return ERR_INVALID_ARGS;
+    memcpy(&config, cmd, sizeof(config));
+    uint32_t index;
+    if (max < sizeof(index))
+        return ERR_BUFFER_TOO_SMALL;
+    mx_status_t status = x86_pt_alloc_buffer(ipt_dev, &config, &index);
+    if (status != NO_ERROR)
+        return status;
+    memcpy(reply, &index, sizeof(index));
+    return sizeof(index);
+}
+
+static ssize_t ipt_assign_buffer_thread(ipt_device_t* ipt_dev,
+                                        const void* cmd, size_t cmdlen,
+                                        void* reply, size_t max) {
+    ioctl_ipt_assign_buffer_thread_t assign;
+    if (cmdlen != sizeof(assign))
+        return ERR_INVALID_ARGS;
+    if (max != 0)
+        return ERR_INVALID_ARGS;
+    memcpy(&assign, cmd, sizeof(assign));
+    return x86_pt_assign_buffer_thread(ipt_dev, assign.descriptor, assign.thread);
+}
+
+static ssize_t ipt_release_buffer_thread(ipt_device_t* ipt_dev,
+                                         const void* cmd, size_t cmdlen,
+                                         void* reply, size_t max) {
+    ioctl_ipt_assign_buffer_thread_t assign;
+    if (cmdlen != sizeof(assign))
+        return ERR_INVALID_ARGS;
+    if (max != 0)
+        return ERR_INVALID_ARGS;
+    memcpy(&assign, cmd, sizeof(assign));
+    return x86_pt_release_buffer_thread(ipt_dev, assign.descriptor, assign.thread);
+}
+
+static ssize_t ipt_get_buffer_config(ipt_device_t* ipt_dev,
+                                     const void* cmd, size_t cmdlen,
+                                     void* reply, size_t max) {
+    uint32_t index;
+    ioctl_ipt_buffer_config_t config;
+
+    if (cmdlen != sizeof(index))
+        return ERR_INVALID_ARGS;
+    if (max < sizeof(config))
+        return ERR_BUFFER_TOO_SMALL;
+
+    memcpy(&index, cmd, sizeof(index));
+    if (index >= ipt_dev->num_traces)
+        return ERR_INVALID_ARGS;
+    ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[index];
+    if (!per_trace->allocated)
+        return ERR_INVALID_ARGS;
+
+    config.num_buffers = per_trace->num_buffers;
+    config.buffer_order = per_trace->buffer_order;
+    config.is_circular = per_trace->is_circular;
+    config.ctl = per_trace->ctl;
+    config.cr3_match = per_trace->cr3_match;
+    static_assert(sizeof(config.addr_ranges) == sizeof(per_trace->addr_ranges),
+                  "addr range size mismatch");
+    memcpy(config.addr_ranges, per_trace->addr_ranges, sizeof(per_trace->addr_ranges));
+    memcpy(reply, &config, sizeof(config));
+    return sizeof(config);
+}
+
+static ssize_t ipt_get_buffer_data(ipt_device_t* ipt_dev,
+                                   const void* cmd, size_t cmdlen,
+                                   void* reply, size_t max) {
+    if (ipt_dev->active)
+        return ERR_BAD_STATE;
+
+    uint32_t index;
+    if (cmdlen != sizeof(index))
+        return ERR_INVALID_ARGS;
+    memcpy(&index, cmd, sizeof(index));
+    if (index >= ipt_dev->num_traces)
+        return ERR_INVALID_ARGS;
+    ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[index];
+    if (!per_trace->allocated)
+        return ERR_INVALID_ARGS;
+
+    ioctl_ipt_buffer_data_t data;
+    if (max < sizeof(data))
+        return ERR_BUFFER_TOO_SMALL;
+
+    data.capture_size = compute_capture_size(ipt_dev, per_trace);
+    memcpy(reply, &data, sizeof(data));
+    return sizeof(data);
+}
+
+static ssize_t ipt_get_buffer_handle(ipt_device_t* ipt_dev,
+                                     const void* cmd, size_t cmdlen,
+                                     void* reply, size_t max) {
+    ioctl_ipt_buffer_handle_rqst_t rqst;
+    mx_handle_t h;
+
+    if (cmdlen != sizeof(rqst))
+        return ERR_INVALID_ARGS;
+    if (max < sizeof(h))
+        return ERR_BUFFER_TOO_SMALL;
+
+    memcpy(&rqst, cmd, sizeof(rqst));
+    if (rqst.descriptor >= ipt_dev->num_traces)
+        return ERR_INVALID_ARGS;
+    ipt_per_trace_state_t* per_trace = &ipt_dev->per_trace_state[rqst.descriptor];
+    if (!per_trace->allocated)
+        return ERR_INVALID_ARGS;
+    if (rqst.buffer_num >= per_trace->num_buffers)
+        return ERR_INVALID_ARGS;
+    mx_status_t status = mx_handle_duplicate(per_trace->buffers[rqst.buffer_num].vmo_handle, MX_RIGHT_SAME_RIGHTS, &h);
+    if (status < 0)
+        return status;
+    memcpy(reply, &h, sizeof(h));
+    return sizeof(h);
+}
+
+static ssize_t ipt_free_buffer(ipt_device_t* ipt_dev,
+                               const void* cmd, size_t cmdlen,
+                               void* reply, size_t max) {
+    uint32_t index;
+
+    if (cmdlen != sizeof(index))
+        return ERR_INVALID_ARGS;
     if (max != 0)
         return ERR_INVALID_ARGS;
 
-    // Some sensible limit on the file name. There is PATH_MAX, MAXPATHLEN,
-    // and others. Not sure what's appropriate here.
-    const size_t max_path_len = 1024;
-    if (cmdlen > max_path_len)
-        return ERR_INVALID_ARGS;
-
-    char* cmdcopy = malloc(cmdlen + 1);
-    if (!cmdcopy)
-        return ERR_NO_MEMORY;
-    memcpy(cmdcopy, cmd, cmdlen);
-    cmdcopy[cmdlen] = 0;
-
-    // 10: for cpu number
-    size_t pathlen = cmdlen + 10;
-    char* path = malloc(pathlen);
-    if (!path) {
-        free(cmdcopy);
-        return ERR_NO_MEMORY;
-    }
-
-    int fd = -1;
-    size_t buffer_size = (1 << ipt_dev->buffer_order) * PAGE_SIZE;
-    mx_status_t status;
-
-    for (uint32_t cpu = 0; cpu < ipt_dev->num_cpus; ++cpu) {
-        ipt_per_cpu_state_t* per_cpu = &ipt_dev->per_cpu_state[cpu];
-        uint64_t capture_size;
-        status = x86_pt_read_size(ipt_dev, cpu, &capture_size);
-        if (status != NO_ERROR)
-            goto Fail;
-        snprintf(path, pathlen, "%s.%u.pt", cmdcopy, cpu);
-        fd = open(path, O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
-        if (fd < 0) {
-            xprintf("IPT: unable to write file: %s: %s\n", path, strerror(errno));
-            status = ERR_BAD_PATH;
-            goto Fail;
-        }
-        size_t bytes_left = capture_size;
-        for (size_t i = 0; i < ipt_dev->num_buffers && bytes_left > 0; ++i) {
-            void* buf = io_buffer_virt(&per_cpu->buffers[i]);
-            size_t to_write = buffer_size;
-            if (to_write > bytes_left)
-                to_write = bytes_left;
-            if (write(fd, buf, to_write) != (ssize_t) to_write) {
-                xprintf("IPT: short write, file: %s\n", path);
-                status = ERR_IO;
-                goto Fail;
-            }
-            bytes_left -= to_write;
-        }
-        assert(bytes_left == 0);
-        close(fd);
-        fd = -1;
-    }
-
-    status = NO_ERROR;
-
-  Fail:
-    free(cmdcopy);
-    free(path);
-    if (fd != -1)
-        close(fd);
-    return status;
+    memcpy(&index, cmd, sizeof(index));
+    x86_pt_free_buffer(ipt_dev, index);
+    return 0;
 }
 
 static ssize_t ipt_ioctl(mx_device_t* dev, uint32_t op,
@@ -791,60 +835,40 @@ static ssize_t ipt_ioctl(mx_device_t* dev, uint32_t op,
     ipt_device_t* ipt_dev = get_ipt_device(dev);
 
     switch (op) {
-    case IOCTL_IPT_ALLOC:
+    case IOCTL_IPT_SET_MODE:
+        return ipt_set_mode(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_ALLOC_BUFFER:
+        return ipt_alloc_buffer(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_ASSIGN_BUFFER_THREAD:
+        return ipt_assign_buffer_thread(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_RELEASE_BUFFER_THREAD:
+        return ipt_release_buffer_thread(ipt_dev, cmd, cmdlen, reply, max); 
+   case IOCTL_IPT_GET_BUFFER_CONFIG:
+        return ipt_get_buffer_config(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_GET_BUFFER_DATA:
+        return ipt_get_buffer_data(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_GET_BUFFER_HANDLE:
+        return ipt_get_buffer_handle(ipt_dev, cmd, cmdlen, reply, max);
+    case IOCTL_IPT_FREE_BUFFER:
+        return ipt_free_buffer(ipt_dev, cmd, cmdlen, reply, max);
+
+    case IOCTL_IPT_CPU_MODE_ALLOC:
         if (cmdlen != 0 || max != 0)
             return ERR_INVALID_ARGS;
-        return x86_pt_alloc(ipt_dev);
-    case IOCTL_IPT_START:
+        return x86_pt_cpu_mode_alloc(ipt_dev);
+    case IOCTL_IPT_CPU_MODE_START:
         if (cmdlen != 0 || max != 0)
             return ERR_INVALID_ARGS;
-        return x86_pt_start(ipt_dev);
-    case IOCTL_IPT_STOP:
+        return x86_pt_cpu_mode_start(ipt_dev);
+    case IOCTL_IPT_CPU_MODE_STOP:
         if (cmdlen != 0 || max != 0)
             return ERR_INVALID_ARGS;
-        return x86_pt_stop(ipt_dev);
-    case IOCTL_IPT_FREE:
+        return x86_pt_cpu_mode_stop(ipt_dev);
+    case IOCTL_IPT_CPU_MODE_FREE:
         if (cmdlen != 0 || max != 0)
             return ERR_INVALID_ARGS;
-        return x86_pt_free(ipt_dev);
-    case IOCTL_IPT_WRITE_FILE:
-        return ipt_write_file(ipt_dev, cmd, cmdlen, reply, max);
-    case IOCTL_IPT_SET_BUFFER_SIZE: {
-        if (max != 0)
-            return ERR_INVALID_ARGS;
-        size_t size[3];
-        if (cmdlen != sizeof(size))
-            return ERR_INVALID_ARGS;
-        memcpy(size, cmd, sizeof(size));
-        return x86_pt_set_buffer_size(ipt_dev, size[0], size[1], size[2] != 0);
-    }
-    case IOCTL_IPT_SET_CTL_CONFIG: {
-        if (max != 0)
-            return ERR_INVALID_ARGS;
-        uint64_t ctl_config;
-        if (cmdlen != sizeof(ctl_config))
-            return ERR_INVALID_ARGS;
-        memcpy(&ctl_config, cmd, sizeof(ctl_config));
-        return x86_pt_set_ctl_config(ipt_dev, ctl_config);
-    }
-    case IOCTL_IPT_SET_CR3_FILTER: {
-        if (max != 0)
-            return ERR_INVALID_ARGS;
-        uint64_t cr3_filter;
-        if (cmdlen != sizeof(cr3_filter))
-            return ERR_INVALID_ARGS;
-        memcpy(&cr3_filter, cmd, sizeof(cr3_filter));
-        return x86_pt_set_cr3_filter(ipt_dev, cr3_filter);
-    }
-    case IOCTL_IPT_SET_ADDR_CONFIG: {
-        if (max != 0)
-            return ERR_INVALID_ARGS;
-        uint64_t addr[3];
-        if (cmdlen != sizeof(addr))
-            return ERR_INVALID_ARGS;
-        memcpy(addr, cmd, sizeof(addr));
-        return x86_pt_set_addr_config(ipt_dev, addr[0], addr[1], addr[2]);
-    }
+        return x86_pt_cpu_mode_free(ipt_dev);
+
     default:
         return ERR_INVALID_ARGS;
     }
@@ -855,8 +879,10 @@ static mx_status_t ipt_release(mx_device_t* dev) {
 
     // TODO(dje): Neither of these should fail. What to do?
     // For now flag things as busted and prevent further use.
-    x86_pt_stop(ipt_dev);
-    x86_pt_free(ipt_dev);
+    x86_pt_cpu_mode_stop(ipt_dev);
+    x86_pt_cpu_mode_free(ipt_dev);
+
+    free(ipt_dev);
 
     return NO_ERROR;
 }
