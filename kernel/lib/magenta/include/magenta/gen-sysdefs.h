@@ -359,6 +359,15 @@ mx_status_t sys_mtrace_control(
     void* ptr,
     uint32_t size);
 
+mx_status_t sys_mtrace_control_thread(
+    mx_handle_t handle,
+    mx_handle_t thread_handle,
+    uint32_t kind,
+    uint32_t action,
+    uint32_t options,
+    void* ptr,
+    uint32_t size);
+
 mx_status_t sys_thread_arch_prctl(
     mx_handle_t handle,
     uint32_t op,

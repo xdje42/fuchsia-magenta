@@ -10,13 +10,14 @@
 #include <kernel/thread.h>
 #include <arch/x86.h>
 #include <arch/debugger.h>
+#include <arch/x86/mtrace_ipt.h> // TODO(dje): wip wip wip
 #include <magenta/syscalls/debug.h>
 
 uint arch_num_regsets(void)
 {
 #if ARCH_X86_64
-    // TODO(dje): for now. general regs
-    return 1;
+    // TODO(dje): for now. general regs, pt(Processor Trace) regs
+    return 2;
 #else
     return 0;
 #endif
@@ -118,6 +119,8 @@ status_t arch_get_regset(struct thread *thread, uint regset, void *regs, uint32_
     {
     case 0:
         return arch_get_general_regs(thread, regs, buf_size);
+    case 1:
+        return x86_get_pt_regs(thread, regs, buf_size);
     default:
         return ERR_INVALID_ARGS;
     }
@@ -129,6 +132,8 @@ status_t arch_set_regset(struct thread *thread, uint regset, const void *regs, u
     {
     case 0:
         return arch_set_general_regs(thread, regs, buf_size);
+    case 1:
+        return x86_set_pt_regs(thread, regs, buf_size);
     default:
         return ERR_INVALID_ARGS;
     }

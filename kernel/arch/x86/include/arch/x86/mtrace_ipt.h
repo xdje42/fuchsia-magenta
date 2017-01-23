@@ -10,6 +10,11 @@
 #include <magenta/compiler.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+#include <magenta/thread_dispatcher.h>
+#include <mxtl/ref_ptr.h>
+#endif
+
 __BEGIN_CDECLS
 
 void x86_processor_trace_init(void);
