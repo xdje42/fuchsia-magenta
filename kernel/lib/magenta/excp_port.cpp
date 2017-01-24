@@ -134,7 +134,6 @@ void ExceptionPort::OnProcessExit(ProcessDispatcher* process) {
 
 // This isn't called for every thread's destruction, only for threads that
 // have a thread-specific exception handler.
-// TODO(dje): Debugger's needs.
 
 void ExceptionPort::OnThreadExit(UserThread* thread) {
     mx_koid_t pid = thread->process()->get_koid();
@@ -144,4 +143,23 @@ void ExceptionPort::OnThreadExit(UserThread* thread) {
     BuildThreadGoneReport(&report, pid, tid);
     // The result is ignored, not much else we can do.
     SendReport(&report);
+}
+
+// This isn't called for every thread's destruction, only when a debugger
+// is attached.
+
+void ExceptionPort::OnThreadExitForDebugger(UserThread* thread) {
+    mx_koid_t pid = thread->process()->get_koid();
+    mx_koid_t tid = thread->get_koid();
+    LTRACEF("thread %" PRIu64 ".%" PRIu64 " exited\n", pid, tid);
+    mx_exception_report_t report;
+    BuildThreadGoneReport(&report, pid, tid);
+    arch_exception_context_t context;
+    // There is no iframe at the moment. We'll need one (or equivalent) if/when
+    // we want to make $pc, $sp available.
+    memset(&context, 0, sizeof(context));
+    auto status = thread->ExceptionHandlerExchange(mxtl::RefPtr<ExceptionPort>(this), &report, &context);
+    if (status != NO_ERROR) {
+        // Ignore any errors, we still want the thread to run.
+    }
 }

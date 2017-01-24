@@ -26,6 +26,7 @@ public:
 
     void OnProcessExit(ProcessDispatcher* process);
     void OnThreadExit(UserThread* thread);
+    void OnThreadExitForDebugger(UserThread* thread);
 
 private:
     ExceptionPort(mxtl::RefPtr<PortDispatcher> port, uint64_t port_key);
