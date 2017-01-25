@@ -1263,6 +1263,25 @@ void dump_thread(thread_t *t, bool full_dump)
     }
 }
 
+extern bool any_thread_uses_pt(void);
+bool any_thread_uses_pt(void)
+{
+    thread_t *t;
+    bool result = false;
+
+    THREAD_LOCK(state);
+    list_for_every_entry(&thread_list, t, thread_t, thread_list_node) {
+        extern bool x86_thread_uses_pt(thread_t*);
+        if (x86_thread_uses_pt(t)) {
+            result = true;
+            break;
+        }
+    }
+    THREAD_UNLOCK(state);
+
+    return result;
+}
+
 /**
  * @brief  Dump debugging info about all threads
  */

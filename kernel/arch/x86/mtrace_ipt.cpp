@@ -121,14 +121,27 @@ void x86_processor_trace_init(void)
 
 static void mtrace_ipt_set_mode_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(!active && raw_context);
+    DEBUG_ASSERT(!active);
+
+    // When changing modes make sure all PT MSRs are in the init state.
+    // We don't want a value to appear in the xsave buffer and have xrstor
+    // #gp because XCOMP_BV has the PT bit set that's not set in XSS.
+    write_msr(IA32_RTIT_CTL, 0);
+    write_msr(IA32_RTIT_STATUS, 0);
+    write_msr(IA32_RTIT_OUTPUT_BASE, 0);
+    write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
+    if (supports_cr3_filtering)
+        write_msr(IA32_RTIT_CR3_MATCH, 0);
+    // TODO(dje): addr range msrs
 
     ipt_trace_mode_t new_mode = static_cast<ipt_trace_mode_t>(reinterpret_cast<uintptr_t>(raw_context));
 
     // PT state saving, if supported, was enabled during boot so there's no
     // need to recalculate the xsave space needed.
-    x86_pt_set_mode(new_mode == IPT_TRACE_THREADS);
+    if (1) x86_pt_set_mode(new_mode == IPT_TRACE_THREADS);
 }
+
+extern "C" bool any_thread_uses_pt(void);
 
 static status_t mtrace_ipt_set_mode(ipt_trace_mode_t mode) {
     if (active)
@@ -137,7 +150,9 @@ static status_t mtrace_ipt_set_mode(ipt_trace_mode_t mode) {
         return ERR_BAD_STATE;
 
     // TODO(dje): Only change the mode when tracing is fully off in all
-    // threads?
+    // threads.
+    if (any_thread_uses_pt())
+        return ERR_BAD_STATE - 1000;
 
     mp_sync_exec(MP_CPU_ALL, mtrace_ipt_set_mode_task,
                  reinterpret_cast<void*> (mode));
@@ -180,7 +195,7 @@ static status_t mtrace_ipt_cpu_mode_free() {
     return NO_ERROR;    
 }
 
-static void mtrace_ipt_start_task(void* raw_context) {
+static void mtrace_ipt_start_cpu_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(active && raw_context);
 
@@ -202,7 +217,8 @@ static void mtrace_ipt_start_task(void* raw_context) {
 
     // Load all other msrs, prior to enabling tracing.
     write_msr(IA32_RTIT_STATUS, state->status);
-    write_msr(IA32_RTIT_CR3_MATCH, cr3_match);
+    if (supports_cr3_filtering)
+        write_msr(IA32_RTIT_CR3_MATCH, cr3_match);
 
     // Enable the trace
     write_msr(IA32_RTIT_CTL, state->ctl);
@@ -227,15 +243,12 @@ static status_t mtrace_ipt_cpu_mode_start() {
 
     active = true;
 
-    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_start_task, ipt_cpu_state);
+    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_start_cpu_task, ipt_cpu_state);
 
     return NO_ERROR;
 }
 
-// This can be called while not active, so the caller doesn't have to care
-// during any cleanup.
-
-static void mtrace_ipt_stop_task(void* raw_context) {
+static void mtrace_ipt_stop_cpu_task(void* raw_context) {
     DEBUG_ASSERT(arch_ints_disabled());
     DEBUG_ASSERT(raw_context);
 
@@ -257,24 +270,24 @@ static void mtrace_ipt_stop_task(void* raw_context) {
     write_msr(IA32_RTIT_STATUS, 0);
     write_msr(IA32_RTIT_OUTPUT_BASE, 0);
     write_msr(IA32_RTIT_OUTPUT_MASK_PTRS, 0);
-    if (supports_cr3_filtering) {
+    if (supports_cr3_filtering)
         write_msr(IA32_RTIT_CR3_MATCH, 0);
-    }
 
     // TODO(teisenbe): Clear ADDR* MSRs depending on leaf 1
 }
+
+// This can be called while not active, so the caller doesn't have to care
+// during any cleanup.
 
 static status_t mtrace_ipt_cpu_mode_stop() {
     TRACEF("Disabling processor trace\n");
 
     if (trace_mode == IPT_TRACE_THREADS)
         return ERR_BAD_STATE;
-    if (!active)
-        return ERR_BAD_STATE;
     if (!ipt_cpu_state)
         return ERR_BAD_STATE;
 
-    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_stop_task, ipt_cpu_state);
+    mp_sync_exec(MP_CPU_ALL, mtrace_ipt_stop_cpu_task, ipt_cpu_state);
 
     active = false;
     return NO_ERROR;
