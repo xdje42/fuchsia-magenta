@@ -289,7 +289,11 @@ static int attempt_userboot(const void* bootfs, size_t bfslen) {
     if (status != NO_ERROR)
         return status;
 
+#if 1
     mxtl::RefPtr<ProcessDispatcher> proc_disp;
+#else
+    mxtl::RefPtr<Dispatcher> proc_disp;
+#endif
     mxtl::RefPtr<VmAddressRegionDispatcher> vmar;
     mx_rights_t rights, vmar_rights;
     status = ProcessDispatcher::Create(GetRootJobDispatcher(), "userboot", 0,
@@ -300,7 +304,11 @@ static int attempt_userboot(const void* bootfs, size_t bfslen) {
 
     handles[BOOTSTRAP_PROC] = MakeHandle(proc_disp, rights);
 
+#if 0
     auto proc = DownCastDispatcher<ProcessDispatcher>(&proc_disp);
+#else
+    auto proc = proc_disp;
+#endif
     ASSERT(proc);
 
     handles[BOOTSTRAP_VMAR_ROOT] = MakeHandle(vmar, vmar_rights);
