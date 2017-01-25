@@ -127,12 +127,7 @@ static void mtrace_ipt_set_mode_task(void* raw_context) {
 
     // PT state saving, if supported, was enabled during boot so there's no
     // need to recalculate the xsave space needed.
-    uint64_t xss = read_msr(IA32_XSS_MSR);
-    if (new_mode == IPT_TRACE_THREADS)
-        xss |= X86_XSAVE_STATE_PT;
-    else
-        xss &= ~(0ull + X86_XSAVE_STATE_PT);
-    write_msr(IA32_XSS_MSR, xss);
+    x86_pt_set_mode(new_mode == IPT_TRACE_THREADS);
 }
 
 static status_t mtrace_ipt_set_mode(ipt_trace_mode_t mode) {

@@ -277,9 +277,7 @@ bool x86_extended_register_enable_feature(
                 !(xss_component_bitmap & X86_XSAVE_STATE_PT)) {
                 return false;
             }
-
-            uint64_t new_state = read_msr(IA32_XSS_MSR) | X86_XSAVE_STATE_PT;
-            write_msr(IA32_XSS_MSR, new_state);
+            x86_pt_set_mode(true);
             break;
         }
         case X86_EXTENDED_REGISTER_PKRU: {
@@ -536,9 +534,26 @@ static void xsetbv(uint32_t reg, uint64_t val)
                      : "memory");
 }
 
+// Set the PT mode to trace either cpus (!threads) or threads.
+
+void x86_pt_set_mode(bool threads) {
+    uint64_t xss = read_msr(IA32_XSS_MSR);
+    if (threads)
+        xss |= X86_XSAVE_STATE_PT;
+    else
+        xss &= ~(0ULL + X86_XSAVE_STATE_PT);
+    write_msr(IA32_XSS_MSR, xss);
+}
+
+static bool x86_pt_get_mode(void) {
+    uint64_t xss = read_msr(IA32_XSS_MSR);
+    return !!(xss & X86_XSAVE_STATE_PT);
+}
+
 /* Layout of PT state in the extended save area.
  * While it may be true that the layout matches the external struct for
- * providing these values (mx_x86_pt_regs_t), we don't assume that. */
+ * providing these values (mx_x86_pt_regs_t), we don't assume that.
+ * Intel Vol. 1 chapter 13.5.6. */
 
 typedef struct {
     uint64_t ctl;
@@ -552,7 +567,7 @@ typedef struct {
 
 /* Return the offset of extended component |c| given |bitmap|. */
 
-static size_t get_component_offset(size_t c, uint64_t bitmap) {
+static size_t get_component_offset(uint c, uint64_t bitmap) {
     size_t offset = 0;
     for (uint i = 2; i < c; ++i) {
         if (!(bitmap & (1ULL << i)))
@@ -579,16 +594,7 @@ static x86_xsave_pt_regs_t *x86_get_pt_regs_buffer(void *reg_state) {
     DEBUG_ASSERT(xcomp_bv & XSAVE_XCOMP_BV_COMPACT);
 
     /* Find the offset where PT regs live. */
-    size_t pt_offset = 0;  
-    for (uint i = 2; i < XSAVE_STATE_PT_BIT; ++i) {
-        if (!(xcomp_bv & (1ULL << i)))
-            continue;
-        if (state_components[i].align64)
-            pt_offset = ROUNDUP(pt_offset, 64);
-        pt_offset += state_components[i].size;
-    }
-    if (state_components[XSAVE_STATE_PT_BIT].align64)
-        pt_offset = ROUNDUP(pt_offset, 64);
+    size_t pt_offset = get_component_offset(XSAVE_STATE_PT_BIT, xcomp_bv);
 
     /* Insert room if needed. The shift needs to take into account any
        potential changes in alignment adjustments. Thus we can't just do a
@@ -622,8 +628,16 @@ status_t x86_get_pt_regs(thread_t *thread, void *regs, uint32_t *buf_size) {
     uint32_t provided_buf_size = *buf_size;
     *buf_size = sizeof(*r);
 
+    // Do "buffer too small" checks first. No point in prohibiting the caller
+    // from finding out the needed size just because thread tracing is
+    // currently disabled.
     if (provided_buf_size < sizeof(*r))
         return ERR_BUFFER_TOO_SMALL;
+
+    if (!x86_feature_test(X86_FEATURE_PT))
+        return ERR_NOT_SUPPORTED;
+    if (!x86_pt_get_mode())
+        return ERR_UNAVAILABLE;
 
     if ((thread->flags & THREAD_FLAG_STOPPED_FOR_EXCEPTION) == 0)
         return ERR_BAD_STATE;
@@ -649,6 +663,11 @@ status_t x86_get_pt_regs(thread_t *thread, void *regs, uint32_t *buf_size) {
 status_t x86_set_pt_regs(thread_t *thread, const void *regs, uint32_t buf_size) {
 #if ARCH_X86_64
     const mx_x86_pt_regs_t *r = regs;
+
+    if (!x86_feature_test(X86_FEATURE_PT))
+        return ERR_NOT_SUPPORTED;
+    if (!x86_pt_get_mode())
+        return ERR_UNAVAILABLE;
 
     if (buf_size != sizeof(*r))
         return ERR_INVALID_ARGS;

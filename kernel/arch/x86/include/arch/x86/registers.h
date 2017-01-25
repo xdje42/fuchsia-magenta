@@ -115,6 +115,7 @@ typedef struct thread thread_t;
 void x86_extended_register_context_switch(
         thread_t *old_thread, thread_t *new_thread);
 
+void x86_pt_set_mode(bool threads);
 status_t x86_get_pt_regs(thread_t *thread, void *regs, uint32_t *buf_size);
 status_t x86_set_pt_regs(thread_t *thread, const void *regs, uint32_t buf_size);
 
