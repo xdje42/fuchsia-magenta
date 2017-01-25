@@ -84,7 +84,7 @@ mx_status_t ProcessDispatcher::Create(
     mxtl::RefPtr<VmAddressRegion> vmar(process->aspace()->RootVmar());
 
     *rights = kDefaultProcessRights;
-    *dispatcher = mxtl::AdoptRef<Dispatcher>(process.release());
+    *dispatcher = mxtl::AdoptRef<ProcessDispatcher>(process.release());
 
     // Create a dispatcher for the root VMAR.
     mxtl::RefPtr<Dispatcher> new_vmar_dispatcher;
