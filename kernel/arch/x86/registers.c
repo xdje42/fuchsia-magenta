@@ -298,7 +298,8 @@ size_t x86_extended_register_size(void) {
 
 void x86_extended_register_init_state(void *register_state)
 {
-    memcpy(register_state, extended_register_init_state, register_state_size);
+    memcpy(register_state, extended_register_init_state,
+           sizeof (extended_register_init_state));
 }
 
 void x86_extended_register_save_state(void *register_state)
@@ -338,6 +339,22 @@ void x86_extended_register_restore_state(void *register_state)
 void x86_extended_register_context_switch(
         thread_t *old_thread, thread_t *new_thread)
 {
+#if 0
+    //TRACEF("old %p, new %p\n", old_thread, new_thread);
+    if (0 && old_thread->arch.extended_register_state) {
+        uint64_t* old_header =
+            (uint64_t*) ((char*) old_thread->arch.extended_register_state + 512);
+        TRACEF("old xstate_bv 0x%" PRIx64 ", xcomp_bv 0x%" PRIx64 "\n",
+               old_header[0], old_header[1]);
+    }
+    if (0 && new_thread->arch.extended_register_state) {
+        uint64_t* new_header =
+            (uint64_t*) ((char*) new_thread->arch.extended_register_state + 512);
+        TRACEF("new xstate_bv 0x%" PRIx64 ", xcomp_bv 0x%" PRIx64 "\n",
+               new_header[0], new_header[1]);
+    }
+#endif
+
     if (likely(old_thread)) {
         x86_extended_register_save_state(old_thread->arch.extended_register_state);
     }
@@ -534,7 +551,19 @@ static void xsetbv(uint32_t reg, uint64_t val)
                      : "memory");
 }
 
+extern bool x86_thread_uses_pt(thread_t* t);
+bool x86_thread_uses_pt(thread_t* t) {
+    if (!t->arch.extended_register_state)
+        return false;
+
+    uint64_t* header =
+        (uint64_t*) ((char*) t->arch.extended_register_state + 512);
+    return !!(header[1] & (1ULL << XSAVE_STATE_PT_BIT));
+}
+
 // Set the PT mode to trace either cpus (!threads) or threads.
+// WARNING: All PT MSRs should be set to init values before changing the mode.
+// See mtrace_ipt_set_mode_task.
 
 void x86_pt_set_mode(bool threads) {
     uint64_t xss = read_msr(IA32_XSS_MSR);

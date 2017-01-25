@@ -206,7 +206,7 @@ static int debuglog_reader(void* arg) {
     return NO_ERROR;
 }
 
-#define REPLAY_LOG 0
+#define REPLAY_LOG 1
 
 #if REPLAY_LOG
 static status_t dlog_read_unsafe(dlog_reader_t* rdr, uint32_t flags, void* ptr, size_t len) {
